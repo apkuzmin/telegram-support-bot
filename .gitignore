@@ -5,7 +5,7 @@ __pycache__/
 *.sqlite3
 *.db
 .DS_Store
-*log
-*pid
+*.log
+*.pid
 *.sqlite3-wal
 *.sqlite3-shm

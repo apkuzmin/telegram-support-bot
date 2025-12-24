@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -40,6 +41,17 @@ class Database:
         if self._conn is None:
             raise RuntimeError("Database not connected")
         return self._conn
+
+    @asynccontextmanager
+    async def transaction(self) -> Any:
+        await self.conn.execute("BEGIN;")
+        try:
+            yield
+        except BaseException:
+            await self.conn.rollback()
+            raise
+        else:
+            await self.conn.commit()
 
     async def init(self) -> None:
         await self.conn.executescript(
@@ -82,6 +94,16 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_messages_user_id_created_at
               ON messages(user_id, created_at);
+
+            DELETE FROM messages
+              WHERE id NOT IN (
+                SELECT MIN(id)
+                  FROM messages
+                 GROUP BY chat_id, message_id
+              );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_id_message_id_unique
+              ON messages(chat_id, message_id);
             """
         )
         await self.conn.commit()
@@ -92,6 +114,8 @@ class Database:
         username: Optional[str],
         first_name: Optional[str],
         last_name: Optional[str],
+        *,
+        commit: bool = True,
     ) -> None:
         now = _now_iso()
         await self.conn.execute(
@@ -106,7 +130,8 @@ class Database:
             """,
             (user_id, username, first_name, last_name, now, now),
         )
-        await self.conn.commit()
+        if commit:
+            await self.conn.commit()
 
     async def get_active_conversation(self, user_id: int) -> Conversation | None:
         cur = await self.conn.execute(
@@ -166,6 +191,7 @@ class Database:
         caption: str | None,
         file_id: str | None,
         payload_json: str | None,
+        commit: bool = True,
     ) -> None:
         await self.conn.execute(
             """
@@ -174,6 +200,7 @@ class Database:
               text, caption, file_id, payload_json, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, message_id) DO NOTHING
             """,
             (
                 user_id,
@@ -188,11 +215,48 @@ class Database:
                 _now_iso(),
             ),
         )
-        await self.conn.commit()
+        if commit:
+            await self.conn.commit()
+
+    async def log_user_message(
+        self,
+        *,
+        user_id: int,
+        username: Optional[str],
+        first_name: Optional[str],
+        last_name: Optional[str],
+        direction: str,
+        chat_id: int,
+        message_id: int,
+        content_type: str,
+        text: str | None,
+        caption: str | None,
+        file_id: str | None,
+        payload_json: str | None,
+    ) -> None:
+        async with self.transaction():
+            await self.upsert_user(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                commit=False,
+            )
+            await self.log_message(
+                user_id=user_id,
+                direction=direction,
+                chat_id=chat_id,
+                message_id=message_id,
+                content_type=content_type,
+                text=text,
+                caption=caption,
+                file_id=file_id,
+                payload_json=payload_json,
+                commit=False,
+            )
 
     async def healthcheck(self) -> dict[str, Any]:
         cur = await self.conn.execute("SELECT 1;")
         row = await cur.fetchone()
         await cur.close()
         return {"ok": row == (1,)}
-

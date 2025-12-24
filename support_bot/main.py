@@ -23,33 +23,37 @@ async def _run() -> None:
     logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
     log = logging.getLogger("support_bot")
 
-    db = Database(config.db_path)
-    await db.connect()
-    await db.init()
-
-    bot = Bot(
-        token=config.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    dp = Dispatcher()
-
-    topics = TopicManager(db=db, operator_group_id=config.operator_group_id)
-
-    dp["db"] = db
-    dp["topics"] = topics
-
-    dp.include_router(user_router)
-
-    operator_router.message.filter(F.chat.id == config.operator_group_id)
-    dp.include_router(operator_router)
-
+    db: Database | None = None
+    bot: Bot | None = None
     try:
+        db = Database(config.db_path)
+        await db.connect()
+        await db.init()
+
+        bot = Bot(
+            token=config.bot_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        dp = Dispatcher()
+
+        topics = TopicManager(db=db, operator_group_id=config.operator_group_id)
+
+        dp["db"] = db
+        dp["topics"] = topics
+
+        dp.include_router(user_router)
+
+        operator_router.message.filter(F.chat.id == config.operator_group_id)
+        dp.include_router(operator_router)
+
         me = await bot.get_me()
         log.info("Started as @%s (id=%s)", me.username, me.id)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        await db.close()
-        await bot.session.close()
+        if db is not None:
+            await db.close()
+        if bot is not None:
+            await bot.session.close()
 
 
 def main() -> None:
