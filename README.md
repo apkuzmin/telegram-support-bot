@@ -10,8 +10,9 @@ For each user, the bot automatically creates a **separate forum topic** and mirr
 
 - **One user → one forum topic** for operators
 - Bidirectional message forwarding (**user ↔ operators**)
+- Reply mirroring across chats (reply in topic ↔ reply in private chat)
 - Automatic topic creation
-- Optional message history stored in **SQLite**
+- **SQLite** for routing + reply mapping, optional message history
 - Built with **aiogram 3**
 
 ## Requirements
@@ -34,8 +35,8 @@ pip install -r requirements.txt
 2.	Create a .env file based on .env.example and set:
 - BOT_TOKEN
 - OPERATOR_GROUP_ID — supergroup ID (e.g. -100...)
-- DB_PATH — SQLite database path (optional)
-- LOG_MESSAGES — set to 0 to disable SQLite logging
+- DB_PATH — SQLite database path (required for routing)
+- LOG_MESSAGES — set to 0 to disable message history logging
 
 3.	Run the bot:
 ```bash
@@ -46,7 +47,8 @@ python -m support_bot
 - A user sends a message to the bot in private chat.
 - The bot creates (or finds) a forum topic in OPERATOR_GROUP_ID linked to that user.
 - All user messages are mirrored into that topic.
-- Message history is stored in SQLite (DB_PATH). Set LOG_MESSAGES=0 to disable logging.
+- Replies are mirrored when the original message exists on the other side.
+- SQLite stores routing and reply links. Message history is stored in SQLite (DB_PATH). Set LOG_MESSAGES=0 to disable history logging.
 
 ### Notes
 The bot works only with supergroups that have Topics (Forum) enabled.
