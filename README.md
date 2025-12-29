@@ -29,10 +29,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 2.	Create a .env file based on .env.example and set:
-
-	•	BOT_TOKEN
-	•	OPERATOR_GROUP_ID — supergroup ID (e.g. -100...)
-	•	DB_PATH — SQLite database path (optional)
+- BOT_TOKEN
+- OPERATOR_GROUP_ID — supergroup ID (e.g. -100...)
+- DB_PATH — SQLite database path (optional)
 
 3.	Run the bot:
 ```bash
@@ -40,15 +39,14 @@ python -m support_bot
 ```
 
 ### How It Works
-	•	A user sends a message to the bot in private chat.
-	•	The bot creates (or finds) a forum topic in OPERATOR_GROUP_ID linked to that user.
-	•	All user messages are mirrored into that topic.
-	•	Any operator messages sent inside that topic are forwarded back to the user.
-	•	Message history is stored in SQLite (DB_PATH).
+- A user sends a message to the bot in private chat.
+- The bot creates (or finds) a forum topic in OPERATOR_GROUP_ID linked to that user.
+- All user messages are mirrored into that topic.
+- Message history is stored in SQLite (DB_PATH).
 
 ### Notes
-	•	The bot works only with supergroups that have Topics (Forum) enabled.
-	•	If topics are not being created, check that the bot has the Manage Topics permission.
+The bot works only with supergroups that have Topics (Forum) enabled.
+If topics are not being created, check that the bot has the Manage Topics permission.
 
 ### License
 
