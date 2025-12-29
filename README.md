@@ -5,6 +5,7 @@ Open-source Telegram support bot: users chat with the bot in private messages, w
 For each user, the bot automatically creates a **separate forum topic** and mirrors the entire conversation there. Operator replies from the topic are sent back to the user’s private chat.
 
 <img src="https://github.com/user-attachments/assets/69be22c3-45a6-4586-a317-982113a630aa" width="600" alt="Telegram Support Bot">
+
 ## Features
 
 - **One user → one forum topic** for operators
