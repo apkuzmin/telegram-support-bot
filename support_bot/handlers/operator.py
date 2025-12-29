@@ -12,7 +12,7 @@ router = Router(name="operator")
 
 
 @router.message(F.is_topic_message.is_(True))
-async def topic_message_to_user(message: Message, bot: Bot, db: Database) -> None:
+async def topic_message_to_user(message: Message, bot: Bot, db: Database, log_messages: bool = True) -> None:
     if message.from_user is None:
         return
     if message.from_user.is_bot:
@@ -32,10 +32,17 @@ async def topic_message_to_user(message: Message, bot: Bot, db: Database) -> Non
             message_id=message.message_id,
         )
     except TelegramForbiddenError:
-        await message.reply("Пользователь запретил сообщения от бота или не открыл чат с ботом.")
+        await message.reply(
+            "The user has blocked the bot or has not opened the chat with the bot."
+        )
         return
     except TelegramBadRequest as err:
-        await message.reply(f"Не удалось отправить пользователю: {getattr(err, 'message', str(err))}")
+        await message.reply(
+            f"Failed to send to the user: {getattr(err, 'message', str(err))}"
+        )
+        return
+
+    if not log_messages:
         return
 
     await db.log_message(

@@ -40,6 +40,7 @@ async def _run() -> None:
 
         dp["db"] = db
         dp["topics"] = topics
+        dp["log_messages"] = config.log_messages
 
         dp.include_router(user_router)
 

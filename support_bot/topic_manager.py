@@ -67,8 +67,8 @@ class TopicManager:
                 chat_id=self._operator_group_id,
                 message_thread_id=topic.message_thread_id,
                 text=(
-                    "Новый диалог.\n"
-                    f"Пользователь: {user.full_name}\n"
+                    "New conversation.\n"
+                    f"User: {user.full_name}\n"
                     f"ID: <code>{user.id}</code>\n"
                     f"Username: {username_line}"
                 ),
@@ -99,7 +99,7 @@ class TopicManager:
                         chat_id=self._operator_group_id,
                         message_thread_id=topic.topic_id,
                         text=(
-                            "Не удалось скопировать сообщение пользователя.\n"
+                            "Failed to copy the user's message.\n"
                             f"type={message.content_type}, message_id={message.message_id}\n"
                             f"error={getattr(err, 'message', str(err))}"
                         ),

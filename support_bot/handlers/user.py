@@ -12,8 +12,10 @@ from support_bot.topic_manager import TopicManager
 router = Router(name="user")
 
 
-async def _log_user_message(db: Database, message: Message) -> None:
+async def _log_user_message(db: Database, message: Message, *, log_messages: bool) -> None:
     if message.from_user is None:
+        return
+    if not log_messages:
         return
 
     await db.log_user_message(
@@ -33,20 +35,24 @@ async def _log_user_message(db: Database, message: Message) -> None:
 
 
 @router.message(CommandStart(), F.chat.type == "private")
-async def start(message: Message, bot: Bot, db: Database, topics: TopicManager) -> None:
+async def start(
+    message: Message, bot: Bot, db: Database, topics: TopicManager, log_messages: bool = True
+) -> None:
     if message.from_user is None:
         return
 
-    await _log_user_message(db, message)
+    await _log_user_message(db, message, log_messages=log_messages)
     await topics.copy_user_message_to_topic(bot, message)
 
-    await message.answer("Здравствуйте! Чем могу вам помочь?")
+    await message.answer("Hello! How can I help you?")
 
 
 @router.message(F.chat.type == "private")
-async def any_private_message(message: Message, bot: Bot, db: Database, topics: TopicManager) -> None:
+async def any_private_message(
+    message: Message, bot: Bot, db: Database, topics: TopicManager, log_messages: bool = True
+) -> None:
     if message.from_user is None:
         return
 
-    await _log_user_message(db, message)
+    await _log_user_message(db, message, log_messages=log_messages)
     await topics.copy_user_message_to_topic(bot, message)

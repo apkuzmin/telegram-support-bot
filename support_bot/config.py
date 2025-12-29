@@ -10,6 +10,7 @@ class Config:
     operator_group_id: int
     db_path: str
     log_level: str = "INFO"
+    log_messages: bool = True
 
 
 def load_config() -> Config:
@@ -28,11 +29,12 @@ def load_config() -> Config:
 
     db_path = os.getenv("DB_PATH", "./support_bot.sqlite3")
     log_level = os.getenv("LOG_LEVEL", "INFO")
+    log_messages = os.getenv("LOG_MESSAGES", "1") != "0"
 
     return Config(
         bot_token=bot_token,
         operator_group_id=operator_group_id,
         db_path=db_path,
         log_level=log_level,
+        log_messages=log_messages,
     )
-
