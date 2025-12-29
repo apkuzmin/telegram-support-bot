@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ class Database:
     def __init__(self, path: str) -> None:
         self._path = path
         self._conn: aiosqlite.Connection | None = None
+        self._tx_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self._conn = await aiosqlite.connect(self._path)
@@ -44,14 +46,15 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> Any:
-        await self.conn.execute("BEGIN;")
-        try:
-            yield
-        except BaseException:
-            await self.conn.rollback()
-            raise
-        else:
-            await self.conn.commit()
+        async with self._tx_lock:
+            await self.conn.execute("BEGIN;")
+            try:
+                yield
+            except BaseException:
+                await self.conn.rollback()
+                raise
+            else:
+                await self.conn.commit()
 
     async def init(self) -> None:
         await self.conn.executescript(

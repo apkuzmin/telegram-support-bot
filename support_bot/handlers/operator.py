@@ -5,7 +5,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.types import Message
 
 from support_bot.db import Database
-from support_bot.telegram_utils import extract_file_id
+from support_bot.telegram_utils import extract_file_id, safe_payload_json
 
 
 router = Router(name="operator")
@@ -54,5 +54,5 @@ async def topic_message_to_user(message: Message, bot: Bot, db: Database, log_me
         text=message.text,
         caption=message.caption,
         file_id=extract_file_id(message),
-        payload_json=message.model_dump_json(exclude_none=True, by_alias=True),
+        payload_json=safe_payload_json(message),
     )

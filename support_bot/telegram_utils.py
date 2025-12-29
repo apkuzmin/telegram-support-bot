@@ -12,3 +12,9 @@ def extract_file_id(message: Message) -> str | None:
             return getattr(obj, "file_id", None)
     return None
 
+
+def safe_payload_json(message: Message) -> str | None:
+    try:
+        return message.model_dump_json(exclude_none=True, by_alias=True, exclude_defaults=True)
+    except Exception:
+        return None

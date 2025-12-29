@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import Message, User
+from aiogram.types import LinkPreviewOptions, Message, User
 
 from support_bot.db import Database
 
@@ -32,6 +32,15 @@ def _is_thread_missing(err: TelegramBadRequest) -> bool:
         or "thread not found" in msg
         or ("topic" in msg and "closed" in msg)
     )
+
+
+def _message_has_links(message: Message) -> bool:
+    entities = message.entities or ()
+    for entity in entities:
+        if entity.type in ("url", "text_link"):
+            return True
+    text = message.text or ""
+    return "http://" in text or "https://" in text or "t.me/" in text or "www." in text
 
 
 class TopicManager:
@@ -90,7 +99,20 @@ class TopicManager:
             )
             return topic
         except TelegramForbiddenError:
-            # Bot can't write to the group/topic — nothing else we can do here.
+            if message.content_type == "text" and _message_has_links(message):
+                try:
+                    await bot.send_message(
+                        chat_id=self._operator_group_id,
+                        message_thread_id=topic.topic_id,
+                        text=message.text or "",
+                        entities=message.entities,
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    )
+                except TelegramForbiddenError:
+                    # Bot can't write to the group/topic — nothing else we can do here.
+                    pass
+                except TelegramBadRequest:
+                    pass
             return topic
         except TelegramBadRequest as err:
             if not _is_thread_missing(err):
