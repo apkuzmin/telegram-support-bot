@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram import Bot, Router, F
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
-from aiogram.types import Message
+from aiogram.types import Message, ReplyParameters
 
 from support_bot.db import Database
 from support_bot.telegram_utils import extract_file_id, safe_payload_json
@@ -25,11 +25,25 @@ async def topic_message_to_user(message: Message, bot: Bot, db: Database, log_me
     if user_id is None:
         return
 
+    reply_params = None
+    if message.reply_to_message is not None:
+        target_message_id = await db.find_linked_message_id(
+            source_chat_id=message.chat.id,
+            source_message_id=message.reply_to_message.message_id,
+            target_chat_id=user_id,
+        )
+        if target_message_id is not None:
+            reply_params = ReplyParameters(
+                message_id=target_message_id,
+                allow_sending_without_reply=True,
+            )
+
     try:
-        await bot.copy_message(
+        copy_result = await bot.copy_message(
             chat_id=user_id,
             from_chat_id=message.chat.id,
             message_id=message.message_id,
+            reply_parameters=reply_params,
         )
     except TelegramForbiddenError:
         await message.reply(
@@ -41,6 +55,28 @@ async def topic_message_to_user(message: Message, bot: Bot, db: Database, log_me
             f"Failed to send to the user: {getattr(err, 'message', str(err))}"
         )
         return
+
+    copied_message_id = getattr(copy_result, "message_id", None)
+    if copied_message_id is None:
+        copied_message_id = int(copy_result)
+
+    async with db.transaction():
+        await db.log_message_link(
+            user_id=user_id,
+            source_chat_id=message.chat.id,
+            source_message_id=message.message_id,
+            target_chat_id=user_id,
+            target_message_id=int(copied_message_id),
+            commit=False,
+        )
+        await db.log_message_link(
+            user_id=user_id,
+            source_chat_id=user_id,
+            source_message_id=int(copied_message_id),
+            target_chat_id=message.chat.id,
+            target_message_id=message.message_id,
+            commit=False,
+        )
 
     if not log_messages:
         return

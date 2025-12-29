@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import LinkPreviewOptions, Message, User
+from aiogram.types import LinkPreviewOptions, Message, ReplyParameters, User
 
 from support_bot.db import Database
 
@@ -90,23 +90,44 @@ class TopicManager:
             raise RuntimeError("Message has no from_user")
 
         topic = await self.ensure_topic(bot, message.from_user)
+        reply_params = await self._build_reply_params(
+            source_chat_id=message.chat.id,
+            source_message=message.reply_to_message,
+            target_chat_id=self._operator_group_id,
+        )
         try:
-            await bot.copy_message(
+            copy_result = await bot.copy_message(
                 chat_id=self._operator_group_id,
                 from_chat_id=message.chat.id,
                 message_id=message.message_id,
                 message_thread_id=topic.topic_id,
+                reply_parameters=reply_params,
+            )
+            await self._log_message_link(
+                user_id=message.from_user.id,
+                source_chat_id=message.chat.id,
+                source_message_id=message.message_id,
+                target_chat_id=self._operator_group_id,
+                target_message_id=self._extract_message_id(copy_result),
             )
             return topic
         except TelegramForbiddenError:
             if message.content_type == "text" and _message_has_links(message):
                 try:
-                    await bot.send_message(
+                    sent = await bot.send_message(
                         chat_id=self._operator_group_id,
                         message_thread_id=topic.topic_id,
                         text=message.text or "",
                         entities=message.entities,
                         link_preview_options=LinkPreviewOptions(is_disabled=True),
+                        reply_parameters=reply_params,
+                    )
+                    await self._log_message_link(
+                        user_id=message.from_user.id,
+                        source_chat_id=message.chat.id,
+                        source_message_id=message.message_id,
+                        target_chat_id=self._operator_group_id,
+                        target_message_id=sent.message_id,
                     )
                 except TelegramForbiddenError:
                     # Bot can't write to the group/topic — nothing else we can do here.
@@ -131,10 +152,74 @@ class TopicManager:
                 return topic
             await self._db.deactivate_conversation(message.from_user.id)
             topic = await self.ensure_topic(bot, message.from_user)
-            await bot.copy_message(
+            reply_params = None
+            copy_result = await bot.copy_message(
                 chat_id=self._operator_group_id,
                 from_chat_id=message.chat.id,
                 message_id=message.message_id,
                 message_thread_id=topic.topic_id,
+                reply_parameters=reply_params,
+            )
+            await self._log_message_link(
+                user_id=message.from_user.id,
+                source_chat_id=message.chat.id,
+                source_message_id=message.message_id,
+                target_chat_id=self._operator_group_id,
+                target_message_id=self._extract_message_id(copy_result),
             )
             return topic
+
+    async def _build_reply_params(
+        self,
+        *,
+        source_chat_id: int,
+        source_message: Message | None,
+        target_chat_id: int,
+    ) -> ReplyParameters | None:
+        if source_message is None:
+            return None
+        target_message_id = await self._db.find_linked_message_id(
+            source_chat_id=source_chat_id,
+            source_message_id=source_message.message_id,
+            target_chat_id=target_chat_id,
+        )
+        if target_message_id is None:
+            return None
+        return ReplyParameters(
+            message_id=target_message_id,
+            allow_sending_without_reply=True,
+        )
+
+    async def _log_message_link(
+        self,
+        *,
+        user_id: int,
+        source_chat_id: int,
+        source_message_id: int,
+        target_chat_id: int,
+        target_message_id: int,
+    ) -> None:
+        async with self._db.transaction():
+            await self._db.log_message_link(
+                user_id=user_id,
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+                target_chat_id=target_chat_id,
+                target_message_id=target_message_id,
+                commit=False,
+            )
+            await self._db.log_message_link(
+                user_id=user_id,
+                source_chat_id=target_chat_id,
+                source_message_id=target_message_id,
+                target_chat_id=source_chat_id,
+                target_message_id=source_message_id,
+                commit=False,
+            )
+
+    @staticmethod
+    def _extract_message_id(result: object) -> int:
+        message_id = getattr(result, "message_id", None)
+        if message_id is None:
+            return int(result)
+        return int(message_id)

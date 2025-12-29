@@ -107,6 +107,23 @@ class Database:
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_id_message_id_unique
               ON messages(chat_id, message_id);
+
+            CREATE TABLE IF NOT EXISTS message_links (
+              id                INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id           INTEGER NOT NULL,
+              source_chat_id    INTEGER NOT NULL,
+              source_message_id INTEGER NOT NULL,
+              target_chat_id    INTEGER NOT NULL,
+              target_message_id INTEGER NOT NULL,
+              created_at        TEXT NOT NULL,
+              FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_message_links_source_unique
+              ON message_links(source_chat_id, source_message_id);
+
+            CREATE INDEX IF NOT EXISTS idx_message_links_user_id
+              ON message_links(user_id);
             """
         )
         await self.conn.commit()
@@ -220,6 +237,66 @@ class Database:
         )
         if commit:
             await self.conn.commit()
+
+    async def log_message_link(
+        self,
+        *,
+        user_id: int,
+        source_chat_id: int,
+        source_message_id: int,
+        target_chat_id: int,
+        target_message_id: int,
+        commit: bool = True,
+    ) -> None:
+        await self.conn.execute(
+            """
+            INSERT INTO message_links (
+              user_id, source_chat_id, source_message_id,
+              target_chat_id, target_message_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_chat_id, source_message_id) DO NOTHING
+            """,
+            (
+                user_id,
+                source_chat_id,
+                source_message_id,
+                target_chat_id,
+                target_message_id,
+                _now_iso(),
+            ),
+        )
+        if commit:
+            await self.conn.commit()
+
+    async def find_linked_message_id(
+        self,
+        *,
+        source_chat_id: int,
+        source_message_id: int,
+        target_chat_id: int | None = None,
+    ) -> int | None:
+        if target_chat_id is None:
+            cur = await self.conn.execute(
+                """
+                SELECT target_message_id
+                  FROM message_links
+                 WHERE source_chat_id = ? AND source_message_id = ?
+                """,
+                (source_chat_id, source_message_id),
+            )
+        else:
+            cur = await self.conn.execute(
+                """
+                SELECT target_message_id
+                  FROM message_links
+                 WHERE source_chat_id = ? AND source_message_id = ? AND target_chat_id = ?
+                """,
+                (source_chat_id, source_message_id, target_chat_id),
+            )
+        row = await cur.fetchone()
+        await cur.close()
+        return int(row[0]) if row else None
 
     async def log_user_message(
         self,
