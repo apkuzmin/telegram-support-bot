@@ -10,6 +10,7 @@ For each user, the bot automatically creates a **separate forum topic** and mirr
 
 - **One user → one forum topic** for operators
 - Bidirectional message forwarding (**user ↔ operators**)
+- Telegram text formatting is preserved in both directions
 - Reply mirroring across chats (reply in topic ↔ reply in private chat)
 - Automatic topic creation
 - **SQLite** for routing + reply mapping, optional message history
@@ -37,6 +38,7 @@ pip install -r requirements.txt
 - OPERATOR_GROUP_ID — supergroup ID (e.g. -100...)
 - DB_PATH — SQLite database path (required for routing)
 - LOG_MESSAGES — set to 0 to disable message history logging
+- START_MESSAGE — optional `/start` greeting (defaults to English)
 
 3.	Run the bot:
 ```bash
@@ -45,6 +47,7 @@ python -m support_bot
 
 ### How It Works
 - A user sends a message to the bot in private chat.
+- The `/start` command answers with `START_MESSAGE` from the environment.
 - The bot creates (or finds) a forum topic in OPERATOR_GROUP_ID linked to that user.
 - All user messages are mirrored into that topic.
 - Replies are mirrored when the original message exists on the other side.

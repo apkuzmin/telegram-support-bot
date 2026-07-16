@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html import escape
+
 from aiogram import Bot, Router, F
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.types import Message, ReplyParameters
@@ -47,12 +49,13 @@ async def topic_message_to_user(message: Message, bot: Bot, db: Database, log_me
         )
     except TelegramForbiddenError:
         await message.reply(
-            "The user has blocked the bot or has not opened the chat with the bot."
+            "Пользователь заблокировал бота или ещё не открыл чат с ботом."
         )
         return
     except TelegramBadRequest as err:
         await message.reply(
-            f"Failed to send to the user: {getattr(err, 'message', str(err))}"
+            "Не удалось отправить сообщение пользователю: "
+            f"{escape(getattr(err, 'message', str(err)))}"
         )
         return
 

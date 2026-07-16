@@ -4,6 +4,9 @@ import os
 from dataclasses import dataclass
 
 
+DEFAULT_START_MESSAGE = "Hello! How can I help you?"
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str
@@ -11,6 +14,7 @@ class Config:
     db_path: str
     log_level: str = "INFO"
     log_messages: bool = True
+    start_message: str = DEFAULT_START_MESSAGE
 
 
 def load_config() -> Config:
@@ -30,6 +34,7 @@ def load_config() -> Config:
     db_path = os.getenv("DB_PATH", "./support_bot.sqlite3")
     log_level = os.getenv("LOG_LEVEL", "INFO")
     log_messages = os.getenv("LOG_MESSAGES", "1") != "0"
+    start_message = os.getenv("START_MESSAGE", DEFAULT_START_MESSAGE)
 
     return Config(
         bot_token=bot_token,
@@ -37,4 +42,5 @@ def load_config() -> Config:
         db_path=db_path,
         log_level=log_level,
         log_messages=log_messages,
+        start_message=start_message,
     )

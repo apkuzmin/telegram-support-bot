@@ -4,18 +4,29 @@ from aiogram import Bot, Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+from support_bot.config import DEFAULT_START_MESSAGE
 from support_bot.db import Database
 from support_bot.telegram_utils import extract_file_id, safe_payload_json
-from support_bot.topic_manager import TopicManager
+from support_bot.topic_manager import MessageDeliveryError, TopicManager
 
 
 router = Router(name="user")
+DELIVERY_ERROR_TEXT = (
+    "Не удалось передать сообщение службе поддержки. "
+    "Пожалуйста, попробуйте ещё раз немного позже."
+)
 
 
-async def _log_user_message(db: Database, message: Message, *, log_messages: bool) -> None:
+async def _store_user_message(db: Database, message: Message, *, log_messages: bool) -> None:
     if message.from_user is None:
         return
     if not log_messages:
+        await db.upsert_user(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+        )
         return
 
     await db.log_user_message(
@@ -34,17 +45,36 @@ async def _log_user_message(db: Database, message: Message, *, log_messages: boo
     )
 
 
+async def _copy_to_operator_topic(
+    message: Message,
+    bot: Bot,
+    topics: TopicManager,
+) -> bool:
+    try:
+        await topics.copy_user_message_to_topic(bot, message)
+    except MessageDeliveryError:
+        await message.answer(DELIVERY_ERROR_TEXT)
+        return False
+    return True
+
+
 @router.message(CommandStart(), F.chat.type == "private")
 async def start(
-    message: Message, bot: Bot, db: Database, topics: TopicManager, log_messages: bool = True
+    message: Message,
+    bot: Bot,
+    db: Database,
+    topics: TopicManager,
+    log_messages: bool = True,
+    start_message: str = DEFAULT_START_MESSAGE,
 ) -> None:
     if message.from_user is None:
         return
 
-    await _log_user_message(db, message, log_messages=log_messages)
-    await topics.copy_user_message_to_topic(bot, message)
+    await _store_user_message(db, message, log_messages=log_messages)
+    if not await _copy_to_operator_topic(message, bot, topics):
+        return
 
-    await message.answer("Hello! How can I help you?")
+    await message.answer(start_message)
 
 
 @router.message(F.chat.type == "private")
@@ -54,5 +84,5 @@ async def any_private_message(
     if message.from_user is None:
         return
 
-    await _log_user_message(db, message, log_messages=log_messages)
-    await topics.copy_user_message_to_topic(bot, message)
+    await _store_user_message(db, message, log_messages=log_messages)
+    await _copy_to_operator_topic(message, bot, topics)

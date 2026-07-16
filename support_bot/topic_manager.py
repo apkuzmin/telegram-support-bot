@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
+from html import escape
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import LinkPreviewOptions, Message, ReplyParameters, User
 
 from support_bot.db import Database
+
+
+log = logging.getLogger(__name__)
+
+
+class MessageDeliveryError(RuntimeError):
+    """The user's message could not be delivered to the operator topic."""
 
 
 @dataclass(frozen=True)
@@ -17,7 +26,7 @@ class TopicRef:
 
 
 def _topic_name(user: User) -> str:
-    base = user.full_name or "User"
+    base = user.full_name or "Пользователь"
     if user.username:
         base = f"{base} (@{user.username})"
     name = f"{base} [{user.id}]"
@@ -71,15 +80,16 @@ class TopicManager:
             )
             await self._db.set_conversation(user_id=user.id, topic_id=topic.message_thread_id, active=True)
 
-            username_line = f"@{user.username}" if user.username else "—"
+            full_name = escape(user.full_name)
+            username_line = f"@{escape(user.username)}" if user.username else "—"
             await bot.send_message(
                 chat_id=self._operator_group_id,
                 message_thread_id=topic.message_thread_id,
                 text=(
-                    "New conversation.\n"
-                    f"User: {user.full_name}\n"
+                    "Новый диалог.\n"
+                    f"Пользователь: {full_name}\n"
                     f"ID: <code>{user.id}</code>\n"
-                    f"Username: {username_line}"
+                    f"Имя пользователя: {username_line}"
                 ),
             )
 
@@ -89,7 +99,11 @@ class TopicManager:
         if message.from_user is None:
             raise RuntimeError("Message has no from_user")
 
-        topic = await self.ensure_topic(bot, message.from_user)
+        try:
+            topic = await self.ensure_topic(bot, message.from_user)
+        except TelegramAPIError as err:
+            raise self._delivery_error(message, err, stage="create_or_find_topic") from err
+
         reply_params = await self._build_reply_params(
             source_chat_id=message.chat.id,
             source_message=message.reply_to_message,
@@ -111,7 +125,7 @@ class TopicManager:
                 target_message_id=self._extract_message_id(copy_result),
             )
             return topic
-        except TelegramForbiddenError:
+        except TelegramForbiddenError as err:
             if message.content_type == "text" and _message_has_links(message):
                 try:
                     sent = await bot.send_message(
@@ -119,6 +133,7 @@ class TopicManager:
                         message_thread_id=topic.topic_id,
                         text=message.text or "",
                         entities=message.entities,
+                        parse_mode=None,
                         link_preview_options=LinkPreviewOptions(is_disabled=True),
                         reply_parameters=reply_params,
                     )
@@ -129,12 +144,14 @@ class TopicManager:
                         target_chat_id=self._operator_group_id,
                         target_message_id=sent.message_id,
                     )
-                except TelegramForbiddenError:
-                    # Bot can't write to the group/topic — nothing else we can do here.
-                    pass
-                except TelegramBadRequest:
-                    pass
-            return topic
+                    return topic
+                except TelegramAPIError as fallback_err:
+                    raise self._delivery_error(
+                        message,
+                        fallback_err,
+                        stage="send_text_fallback",
+                    ) from fallback_err
+            raise self._delivery_error(message, err, stage="copy_message") from err
         except TelegramBadRequest as err:
             if not _is_thread_missing(err):
                 try:
@@ -142,24 +159,38 @@ class TopicManager:
                         chat_id=self._operator_group_id,
                         message_thread_id=topic.topic_id,
                         text=(
-                            "Failed to copy the user's message.\n"
-                            f"type={message.content_type}, message_id={message.message_id}\n"
-                            f"error={getattr(err, 'message', str(err))}"
+                            "Не удалось скопировать сообщение пользователя.\n"
+                            f"Тип: {message.content_type}, ID сообщения: {message.message_id}\n"
+                            f"Ошибка: {escape(getattr(err, 'message', str(err)))}"
                         ),
                     )
-                except Exception:
-                    pass
-                return topic
+                except Exception as notification_err:
+                    log.warning(
+                        "Failed to notify operators about an undelivered message",
+                        exc_info=(
+                            type(notification_err),
+                            notification_err,
+                            notification_err.__traceback__,
+                        ),
+                    )
+                raise self._delivery_error(message, err, stage="copy_message") from err
+
             await self._db.deactivate_conversation(message.from_user.id)
-            topic = await self.ensure_topic(bot, message.from_user)
-            reply_params = None
-            copy_result = await bot.copy_message(
-                chat_id=self._operator_group_id,
-                from_chat_id=message.chat.id,
-                message_id=message.message_id,
-                message_thread_id=topic.topic_id,
-                reply_parameters=reply_params,
-            )
+            try:
+                topic = await self.ensure_topic(bot, message.from_user)
+                copy_result = await bot.copy_message(
+                    chat_id=self._operator_group_id,
+                    from_chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    message_thread_id=topic.topic_id,
+                    reply_parameters=None,
+                )
+            except TelegramAPIError as retry_err:
+                raise self._delivery_error(
+                    message,
+                    retry_err,
+                    stage="recreate_topic_and_retry",
+                ) from retry_err
             await self._log_message_link(
                 user_id=message.from_user.id,
                 source_chat_id=message.chat.id,
@@ -168,6 +199,30 @@ class TopicManager:
                 target_message_id=self._extract_message_id(copy_result),
             )
             return topic
+        except TelegramAPIError as err:
+            raise self._delivery_error(message, err, stage="copy_message") from err
+
+    @staticmethod
+    def _delivery_error(
+        message: Message,
+        err: TelegramAPIError,
+        *,
+        stage: str,
+    ) -> MessageDeliveryError:
+        user_id = message.from_user.id if message.from_user is not None else None
+        log.error(
+            "Failed to deliver user message to operators: stage=%s user_id=%s "
+            "chat_id=%s message_id=%s content_type=%s",
+            stage,
+            user_id,
+            message.chat.id,
+            message.message_id,
+            message.content_type,
+            exc_info=(type(err), err, err.__traceback__),
+        )
+        return MessageDeliveryError(
+            f"Unable to deliver message {message.message_id} at stage {stage}"
+        )
 
     async def _build_reply_params(
         self,
