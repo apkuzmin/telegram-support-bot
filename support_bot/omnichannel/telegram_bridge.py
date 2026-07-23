@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from aiogram import Bot, F, Router
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, Message, ReplyParameters
@@ -26,6 +27,49 @@ from support_bot.telegram_utils import extract_file_id, safe_payload_json
 
 
 log = logging.getLogger(__name__)
+
+TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_CAPTION_LIMIT = 1024
+STRUCTURED_CONTENT_TYPES = {
+    "contact",
+    "dice",
+    "game",
+    "location",
+    "poll",
+    "venue",
+}
+
+
+def _split_text(value: str, limit: int) -> list[str]:
+    if not value:
+        return []
+    chunks: list[str] = []
+    current: list[str] = []
+    current_units = 0
+    for character in value:
+        units = len(character.encode("utf-16-le")) // 2
+        if current and current_units + units > limit:
+            chunks.append("".join(current))
+            current = []
+            current_units = 0
+        current.append(character)
+        current_units += units
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def _structured_content(message: Message) -> dict[str, Any] | None:
+    if message.content_type not in STRUCTURED_CONTENT_TYPES:
+        return None
+    value = getattr(message, message.content_type, None)
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        data = value.model_dump(mode="json", exclude_none=True)
+    else:
+        data = value
+    return {"type": message.content_type, "data": data}
 
 
 def _telegram_origin(message: Message) -> str:
@@ -167,14 +211,18 @@ class TelegramBridge:
                     "size_bytes": len(content),
                 }
             ]
-        stored = await self.store.create_stored_file(
-            customer_id=customer_id,
-            original_name=saved.original_name,
-            content_type=saved.content_type,
-            size_bytes=saved.size_bytes,
-            sha256=saved.sha256,
-            storage_key=saved.storage_key,
-        )
+        try:
+            stored = await self.store.create_stored_file(
+                customer_id=customer_id,
+                original_name=saved.original_name,
+                content_type=saved.content_type,
+                size_bytes=saved.size_bytes,
+                sha256=saved.sha256,
+                storage_key=saved.storage_key,
+            )
+        except BaseException:
+            self.file_store.delete(saved.storage_key)
+            raise
         return [
             {
                 "id": stored.id,
@@ -220,6 +268,7 @@ class TelegramBridge:
                 "telegram_message_id": str(message.message_id),
                 "telegram_content_type": message.content_type,
                 "telegram_payload": safe_payload_json(message),
+                "structured_content": _structured_content(message),
             },
         )
         return stored
@@ -258,6 +307,7 @@ class TelegramBridge:
                 "telegram_message_id": str(message.message_id),
                 "telegram_content_type": message.content_type,
                 "telegram_payload": safe_payload_json(message),
+                "structured_content": _structured_content(message),
             },
         )
         return stored
@@ -319,6 +369,7 @@ class TelegramBridge:
                     f"Внешний ID: <code>{escape(external_id)}</code>\n"
                     f"Диалог: <code>{conversation.id}</code>"
                 ),
+                parse_mode=ParseMode.HTML,
             )
             return topic_id
 
@@ -373,16 +424,29 @@ class TelegramBridge:
             if attachment.get("id") and not attachment.get("unavailable")
         ]
         if not attachments:
-            sent = await self.bot.send_message(
-                chat_id=chat_id,
-                message_thread_id=message_thread_id,
-                text=message.text or "(пустое сообщение)",
-                reply_parameters=reply_parameters,
+            chunks = _split_text(
+                message.text or "(пустое сообщение)",
+                TELEGRAM_TEXT_LIMIT,
             )
-            return sent.message_id
+            first_message_id: int | None = None
+            for index, chunk in enumerate(chunks):
+                sent = await self.bot.send_message(
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    text=chunk,
+                    reply_parameters=reply_parameters if index == 0 else None,
+                    parse_mode=None,
+                )
+                first_message_id = first_message_id or sent.message_id
+            if first_message_id is None:
+                raise RuntimeError("No text could be delivered")
+            return first_message_id
         stored_files = await self.store.get_files(
             [str(item["id"]) for item in attachments]
         )
+        text_chunks = _split_text(message.text or "", TELEGRAM_CAPTION_LIMIT)
+        caption = text_chunks[0] if text_chunks else None
+        remaining_text = (message.text or "")[len(caption or "") :]
         first_message_id: int | None = None
         for index, stored in enumerate(stored_files):
             sent = await self.bot.send_document(
@@ -392,12 +456,20 @@ class TelegramBridge:
                     self.file_store.path_for(stored.storage_key),
                     filename=stored.original_name,
                 ),
-                caption=message.text if index == 0 else None,
+                caption=caption if index == 0 else None,
                 reply_parameters=reply_parameters if index == 0 else None,
+                parse_mode=None,
             )
             first_message_id = first_message_id or sent.message_id
         if first_message_id is None:
             raise RuntimeError("No attachment could be delivered")
+        for chunk in _split_text(remaining_text, TELEGRAM_TEXT_LIMIT):
+            await self.bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                text=chunk,
+                parse_mode=None,
+            )
         return first_message_id
 
     async def deliver_to_operator_topic(
@@ -499,26 +571,33 @@ class TelegramBridge:
                     await self.bot.edit_message_caption(
                         **kwargs,
                         caption=message.text,
+                        parse_mode=None,
                     )
                 else:
                     await self.bot.edit_message_text(
                         **kwargs,
                         text=message.text or "",
+                        parse_mode=None,
                     )
             except TelegramBadRequest as exc:
                 if "message is not modified" not in str(exc).lower():
-                    await self.store.mark_outbox_event_failed(
-                        event.id,
+                    await self.store.mark_delivery_failed(
+                        event_id=event.id,
+                        delivery_id=delivery_id,
                         error=f"{type(exc).__name__}: {exc}",
                     )
                     return
             except Exception as exc:
-                await self.store.mark_outbox_event_failed(
-                    event.id,
+                await self.store.mark_delivery_failed(
+                    event_id=event.id,
+                    delivery_id=delivery_id,
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 return
-            await self.store.mark_outbox_event_sent(event.id)
+            await self.store.mark_delivery_edit_sent(
+                event_id=event.id,
+                delivery_id=delivery_id,
+            )
             return
         try:
             if delivery.channel == Channel.TELEGRAM_OPERATOR.value:
@@ -581,7 +660,7 @@ def build_telegram_router(bridge: TelegramBridge) -> Router:
     @router.message(CommandStart(), F.chat.type == "private")
     async def start(message: Message) -> None:
         await bridge.ingest_customer_message(message)
-        await message.answer(bridge.start_message)
+        await message.answer(bridge.start_message, parse_mode=None)
 
     @router.message(F.chat.type == "private")
     async def private_message(message: Message) -> None:

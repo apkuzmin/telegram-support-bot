@@ -234,6 +234,10 @@ class StoredFile(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
+    attached_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    cleanup_claimed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )

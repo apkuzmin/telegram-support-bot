@@ -25,6 +25,7 @@ class ConversationStatus(StrEnum):
 class MessageKind(StrEnum):
     TEXT = "text"
     FILE = "file"
+    STRUCTURED = "structured"
     SYSTEM = "system"
 
 

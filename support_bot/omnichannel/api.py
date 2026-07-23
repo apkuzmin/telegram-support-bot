@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import hashlib
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -34,7 +37,10 @@ from support_bot.omnichannel.files import (
     LocalFileStore,
     UnsafeFileTypeError,
 )
-from support_bot.omnichannel.realtime import RealtimeHub
+from support_bot.omnichannel.realtime import (
+    PostgresRealtimeListener,
+    RealtimeHub,
+)
 from support_bot.omnichannel.schemas import (
     ConversationPage,
     ConversationPatch,
@@ -55,6 +61,9 @@ from support_bot.omnichannel.settings import OmnichannelSettings
 from support_bot.omnichannel.storage import OmnichannelStore
 
 
+log = logging.getLogger(__name__)
+
+
 def _bearer_token(authorization: str | None) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -62,6 +71,13 @@ def _bearer_token(authorization: str | None) -> str:
             detail="Bearer token required",
         )
     return authorization[7:].strip()
+
+
+def _web_origin(subject: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(
+        f"{subject}\0{idempotency_key}".encode("utf-8")
+    ).hexdigest()
+    return f"web:{digest}"
 
 
 def create_app(
@@ -85,9 +101,66 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.environment == "development":
             await store.create_schema()
-        yield
-        if owned_store:
-            await store.close()
+        stop_event = asyncio.Event()
+        tasks: list[asyncio.Task[None]] = []
+
+        async def maintain() -> None:
+            while not stop_event.is_set():
+                now = dt.datetime.now(dt.timezone.utc)
+                try:
+                    cleanup_targets = await store.cleanup_expired(
+                        realtime_before=now
+                        - dt.timedelta(
+                            seconds=settings.realtime_retention_seconds
+                        ),
+                        outbox_before=now
+                        - dt.timedelta(
+                            seconds=settings.outbox_retention_seconds
+                        ),
+                        unused_files_before=now
+                        - dt.timedelta(
+                            seconds=settings.unused_file_retention_seconds
+                        ),
+                    )
+                    deleted_ids: list[str] = []
+                    failed_ids: list[str] = []
+                    for target in cleanup_targets:
+                        try:
+                            files.delete(target.storage_key)
+                            deleted_ids.append(target.id)
+                        except OSError:
+                            failed_ids.append(target.id)
+                            log.exception(
+                                "Failed to delete expired support file %s",
+                                target.storage_key,
+                            )
+                    await store.finish_file_cleanup(deleted_ids)
+                    await store.release_file_cleanup(failed_ids)
+                except Exception:
+                    log.exception("Support maintenance failed")
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=settings.maintenance_interval_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
+        tasks.append(asyncio.create_task(maintain()))
+        if store.engine.dialect.name == "postgresql":
+            listener = PostgresRealtimeListener(
+                settings.database_url,
+                realtime,
+            )
+            tasks.append(asyncio.create_task(listener.run(stop_event)))
+        try:
+            yield
+        finally:
+            stop_event.set()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if owned_store:
+                await store.close()
 
     app = FastAPI(
         title="Omnichannel Support API",
@@ -205,7 +278,12 @@ def create_app(
             )
         return [
             MessageView.model_validate(message).model_copy(
-                update={"deliveries": by_message.get(message.id, [])}
+                update={
+                    "deliveries": by_message.get(message.id, []),
+                    "structured_content": message.metadata_json.get(
+                        "structured_content"
+                    ),
+                }
             )
             for message in messages
         ]
@@ -248,14 +326,18 @@ def create_app(
             raise HTTPException(status_code=415, detail=str(exc)) from exc
         finally:
             await upload.close()
-        stored = await store.create_stored_file(
-            customer_id=customer_id,
-            original_name=saved.original_name,
-            content_type=saved.content_type,
-            size_bytes=saved.size_bytes,
-            sha256=saved.sha256,
-            storage_key=saved.storage_key,
-        )
+        try:
+            stored = await store.create_stored_file(
+                customer_id=customer_id,
+                original_name=saved.original_name,
+                content_type=saved.content_type,
+                size_bytes=saved.size_bytes,
+                sha256=saved.sha256,
+                storage_key=saved.storage_key,
+            )
+        except BaseException:
+            files.delete(saved.storage_key)
+            raise
         return {
             "id": stored.id,
             "name": stored.original_name,
@@ -416,7 +498,10 @@ def create_app(
                 sender_type=SenderType.CUSTOMER,
                 sender_id=claims.subject,
                 origin_channel=Channel.WEB_USER,
-                origin_external_id=f"{claims.subject}:{payload.idempotency_key}",
+                origin_external_id=_web_origin(
+                    claims.subject,
+                    payload.idempotency_key,
+                ),
                 text=payload.text,
                 reply_to_message_id=payload.reply_to_message_id,
                 attachments=attachments,
@@ -452,6 +537,14 @@ def create_app(
         )
         if updated is None:
             raise HTTPException(status_code=404, detail="Message not found")
+        await realtime.publish(
+            {
+                "operators",
+                f"conversation:{conversation_id}",
+                f"customer:{claims.subject}",
+            },
+            {"type": "wake"},
+        )
         return (await message_views([updated]))[0]
 
     @app.post(
@@ -478,6 +571,10 @@ def create_app(
             conversation_id,
             f"customer:{claims.subject}",
             payload.last_sequence,
+        )
+        await realtime.publish(
+            {"operators", f"conversation:{conversation_id}"},
+            {"type": "wake"},
         )
 
     @app.get(
@@ -639,7 +736,10 @@ def create_app(
                 sender_type=SenderType.OPERATOR,
                 sender_id=claims.subject,
                 origin_channel=Channel.WEB_OPERATOR,
-                origin_external_id=f"{claims.subject}:{payload.idempotency_key}",
+                origin_external_id=_web_origin(
+                    claims.subject,
+                    payload.idempotency_key,
+                ),
                 text=payload.text,
                 reply_to_message_id=payload.reply_to_message_id,
                 attachments=attachments,
@@ -677,6 +777,10 @@ def create_app(
         )
         if updated is None:
             raise HTTPException(status_code=404, detail="Message not found")
+        await realtime.publish(
+            {"operators", f"conversation:{conversation_id}"},
+            {"type": "wake"},
+        )
         return (
             await message_views([updated], include_delivery_errors=True)
         )[0]
@@ -753,6 +857,10 @@ def create_app(
             conversation_id,
             f"operator:{claims.subject}",
             payload.last_sequence,
+        )
+        await realtime.publish(
+            {"operators", f"conversation:{conversation_id}"},
+            {"type": "wake"},
         )
 
     @app.post(
@@ -842,37 +950,90 @@ def create_app(
         )
         await websocket.send_json({"type": "ready", "event_id": cursor})
         last_client_activity = time.monotonic()
+        active_wait_tasks: set[asyncio.Task] = set()
         try:
-            while True:
-                if int(time.time()) >= claims.expires_at:
-                    await websocket.close(code=4401)
-                    return
-                if (
-                    time.monotonic() - last_client_activity
-                    >= settings.websocket_idle_seconds
-                ):
-                    await websocket.close(code=1000)
-                    return
-                events = await store.list_realtime_events(
-                    after_id=cursor,
-                )
-                for event in events:
-                    cursor = max(cursor, event.id)
-                    if topics.intersection(event.topics_json):
-                        await websocket.send_json(
-                            {**event.payload_json, "event_id": event.id}
-                        )
-                try:
-                    value = await asyncio.wait_for(
-                        websocket.receive_text(),
-                        timeout=0.35,
+            async with realtime.subscribe(topics | {"*"}) as signals:
+                needs_fetch = True
+                while True:
+                    if int(time.time()) >= claims.expires_at:
+                        await websocket.close(code=4401)
+                        return
+                    idle_left = settings.websocket_idle_seconds - (
+                        time.monotonic() - last_client_activity
                     )
-                except asyncio.TimeoutError:
-                    continue
-                if value == "ping":
-                    last_client_activity = time.monotonic()
-                    await websocket.send_text("pong")
-        except WebSocketDisconnect:
+                    token_left = claims.expires_at - int(time.time())
+                    if idle_left <= 0:
+                        await websocket.close(code=1000)
+                        return
+                    if token_left <= 0:
+                        await websocket.close(code=4401)
+                        return
+
+                    if needs_fetch:
+                        while True:
+                            events = await store.list_realtime_events(
+                                after_id=cursor,
+                            )
+                            for event in events:
+                                cursor = max(cursor, event.id)
+                                if topics.intersection(event.topics_json):
+                                    await websocket.send_json(
+                                        {
+                                            **event.payload_json,
+                                            "event_id": event.id,
+                                        }
+                                    )
+                            if len(events) < 100:
+                                break
+                        needs_fetch = False
+
+                    receive_task = asyncio.create_task(
+                        websocket.receive_text()
+                    )
+                    signal_task = asyncio.create_task(signals.get())
+                    wait_tasks = {receive_task, signal_task}
+                    active_wait_tasks = wait_tasks
+                    try:
+                        done, pending = await asyncio.wait(
+                            wait_tasks,
+                            timeout=min(idle_left, token_left),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    except BaseException:
+                        for task in wait_tasks:
+                            task.cancel()
+                        await asyncio.gather(
+                            *wait_tasks,
+                            return_exceptions=True,
+                        )
+                        raise
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(
+                            *pending,
+                            return_exceptions=True,
+                        )
+                    if not done:
+                        continue
+                    if signal_task in done:
+                        signal_task.result()
+                        needs_fetch = True
+                    if receive_task in done:
+                        value = receive_task.result()
+                        if value == "ping":
+                            last_client_activity = time.monotonic()
+                            await websocket.send_text("pong")
+                    active_wait_tasks = set()
+        except (WebSocketDisconnect, asyncio.CancelledError):
             return
+        finally:
+            for task in active_wait_tasks:
+                task.cancel()
+            if active_wait_tasks:
+                await asyncio.gather(
+                    *active_wait_tasks,
+                    return_exceptions=True,
+                )
 
     return app

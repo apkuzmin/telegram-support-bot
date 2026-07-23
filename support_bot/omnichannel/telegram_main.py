@@ -5,7 +5,6 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from dotenv import load_dotenv
 
 from support_bot.config import load_config
@@ -36,7 +35,7 @@ async def _run() -> None:
         await store.create_schema()
     bot = Bot(
         token=telegram_config.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        default=DefaultBotProperties(parse_mode=None),
     )
     stop_event = asyncio.Event()
     bridge = TelegramBridge(

@@ -64,18 +64,14 @@ async def migrate_legacy(
                 for part in (user["first_name"], user["last_name"])
                 if part
             ) or (f"@{user['username']}" if user["username"] else str(user_id))
-            context = await store.get_or_create_customer_context(
-                channel=Channel.TELEGRAM_USER,
-                external_id=str(user_id),
-                display_name=display_name,
-                metadata={"username": user["username"]},
-            )
-            counts["users"] += 1
             legacy_conversation = conversations_by_user.get(user_id)
             if legacy_conversation is not None:
-                await store.set_telegram_topic(
-                    context.conversation.id,
-                    int(legacy_conversation["topic_id"]),
+                context = await store.get_or_create_import_context(
+                    channel=Channel.TELEGRAM_USER,
+                    external_id=str(user_id),
+                    display_name=display_name,
+                    telegram_topic_id=int(legacy_conversation["topic_id"]),
+                    metadata={"username": user["username"]},
                 )
                 if not bool(legacy_conversation["active"]):
                     await store.update_conversation(
@@ -83,6 +79,14 @@ async def migrate_legacy(
                         status=ConversationStatus.CLOSED,
                     )
                 counts["conversations"] += 1
+            else:
+                context = await store.get_or_create_customer_context(
+                    channel=Channel.TELEGRAM_USER,
+                    external_id=str(user_id),
+                    display_name=display_name,
+                    metadata={"username": user["username"]},
+                )
+            counts["users"] += 1
 
             if not await _table_exists(legacy, "messages"):
                 continue
@@ -121,6 +125,23 @@ async def migrate_legacy(
                             "telegram_file_id": old["file_id"],
                         }
                     )
+                structured_content = (
+                    {
+                        "type": old["content_type"],
+                        "data": payload.get(old["content_type"]),
+                    }
+                    if old["content_type"]
+                    in {
+                        "contact",
+                        "dice",
+                        "game",
+                        "location",
+                        "poll",
+                        "venue",
+                    }
+                    and payload.get(old["content_type"]) is not None
+                    else None
+                )
                 stored, created = await store.create_message(
                     conversation_id=context.conversation.id,
                     sender_type=sender_type,
@@ -133,7 +154,13 @@ async def migrate_legacy(
                     origin_external_id=f"{chat_id}:{message_id}",
                     text=old["text"] or old["caption"],
                     kind=(
-                        MessageKind.FILE if attachments else MessageKind.TEXT
+                        MessageKind.FILE
+                        if attachments
+                        else (
+                            MessageKind.STRUCTURED
+                            if structured_content is not None
+                            else MessageKind.TEXT
+                        )
                     ),
                     attachments=attachments,
                     metadata={
@@ -141,6 +168,7 @@ async def migrate_legacy(
                         "telegram_message_id": str(message_id),
                         "telegram_content_type": old["content_type"],
                         "telegram_payload": payload,
+                        "structured_content": structured_content,
                         "legacy_import": True,
                     },
                     emit_realtime=False,

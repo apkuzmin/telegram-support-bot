@@ -4,7 +4,7 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import Select, and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -46,6 +46,12 @@ class CustomerContext:
     customer: Customer
     identity: ChannelIdentity
     conversation: Conversation
+
+
+@dataclass(frozen=True)
+class FileCleanupTarget:
+    id: str
+    storage_key: str
 
 
 class OmnichannelStore:
@@ -152,6 +158,68 @@ class OmnichannelStore:
                 conversation = Conversation(
                     customer_id=customer.id,
                     customer_channel=channel.value,
+                )
+                session.add(conversation)
+                await session.flush()
+            return CustomerContext(customer, identity, conversation)
+
+    async def get_or_create_import_context(
+        self,
+        *,
+        channel: Channel,
+        external_id: str,
+        display_name: str | None,
+        telegram_topic_id: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> CustomerContext:
+        """Resolve legacy history by its durable topic, including closed dialogs."""
+        async with self.sessions.begin() as session:
+            identity = await session.scalar(
+                select(ChannelIdentity).where(
+                    ChannelIdentity.channel == channel.value,
+                    ChannelIdentity.external_id == external_id,
+                )
+            )
+            if identity is None:
+                customer = Customer(display_name=display_name)
+                session.add(customer)
+                await session.flush()
+                identity = ChannelIdentity(
+                    customer_id=customer.id,
+                    channel=channel.value,
+                    external_id=external_id,
+                    metadata_json=metadata or {},
+                )
+                session.add(identity)
+                await session.flush()
+            else:
+                customer = await session.scalar(
+                    select(Customer)
+                    .where(Customer.id == identity.customer_id)
+                    .with_for_update()
+                )
+                if customer is None:
+                    raise RuntimeError("Identity references a missing customer")
+                if display_name and customer.display_name != display_name:
+                    customer.display_name = display_name
+                if metadata:
+                    identity.metadata_json = {
+                        **identity.metadata_json,
+                        **metadata,
+                    }
+
+            conversation = await session.scalar(
+                select(Conversation).where(
+                    Conversation.customer_id == customer.id,
+                    Conversation.customer_channel == channel.value,
+                    Conversation.telegram_topic_id == telegram_topic_id,
+                )
+            )
+            if conversation is None:
+                conversation = Conversation(
+                    customer_id=customer.id,
+                    customer_channel=channel.value,
+                    telegram_topic_id=telegram_topic_id,
                 )
                 session.add(conversation)
                 await session.flush()
@@ -341,6 +409,29 @@ class OmnichannelStore:
             )
             session.add(message)
             await session.flush()
+            attachment_ids = {
+                str(attachment["id"])
+                for attachment in (attachments or [])
+                if attachment.get("id")
+            }
+            if attachment_ids:
+                stored_files = list(
+                    (
+                        await session.scalars(
+                            select(StoredFile)
+                            .where(
+                                StoredFile.id.in_(attachment_ids),
+                                StoredFile.attached_at.is_(None),
+                                StoredFile.cleanup_claimed_at.is_(None),
+                            )
+                            .with_for_update()
+                        )
+                    ).all()
+                )
+                if len(stored_files) != len(attachment_ids):
+                    raise ValueError("One or more attachments are unavailable")
+                for stored_file in stored_files:
+                    stored_file.attached_at = utcnow()
 
             for target in deliveries:
                 delivery = MessageDelivery(
@@ -791,6 +882,23 @@ class OmnichannelStore:
             event.status = DeliveryStatus.SENT.value
             event.locked_at = None
 
+    async def mark_delivery_edit_sent(
+        self,
+        *,
+        event_id: str,
+        delivery_id: str,
+    ) -> None:
+        async with self.sessions.begin() as session:
+            event = await session.get(OutboxEvent, event_id)
+            delivery = await session.get(MessageDelivery, delivery_id)
+            if event is None or delivery is None:
+                raise KeyError(event_id if event is None else delivery_id)
+            event.status = DeliveryStatus.SENT.value
+            event.locked_at = None
+            event.last_error = None
+            delivery.status = DeliveryStatus.SENT.value
+            delivery.last_error = None
+
     async def mark_outbox_event_failed(
         self,
         event_id: str,
@@ -840,20 +948,106 @@ class OmnichannelStore:
                                     DeliveryStatus.DEAD.value,
                                 ]
                             ),
-                        )
+                        ).order_by(OutboxEvent.created_at.desc())
                     )
                 ).all()
             )
+            retry_event_type = "message.delivery.requested"
             for event in old_events:
                 if str(event.payload_json.get("delivery_id")) == delivery.id:
+                    if retry_event_type == "message.delivery.requested":
+                        retry_event_type = event.event_type
                     event.status = DeliveryStatus.DEAD.value
                     event.locked_at = None
                     event.last_error = "Superseded by manual retry"
             session.add(
                 OutboxEvent(
-                    event_type="message.delivery.requested",
+                    event_type=retry_event_type,
                     aggregate_id=delivery.message_id,
                     payload_json={"delivery_id": delivery.id},
                 )
             )
             return delivery
+
+    async def cleanup_expired(
+        self,
+        *,
+        realtime_before: dt.datetime,
+        outbox_before: dt.datetime,
+        unused_files_before: dt.datetime,
+        file_limit: int = 100,
+    ) -> list[FileCleanupTarget]:
+        async with self.sessions.begin() as session:
+            await session.execute(
+                delete(RealtimeEvent).where(
+                    RealtimeEvent.created_at < realtime_before
+                )
+            )
+            await session.execute(
+                delete(OutboxEvent).where(
+                    OutboxEvent.status.in_(
+                        [
+                            DeliveryStatus.SENT.value,
+                            DeliveryStatus.DEAD.value,
+                        ]
+                    ),
+                    OutboxEvent.created_at < outbox_before,
+                )
+            )
+            stale_claim = utcnow() - dt.timedelta(hours=1)
+            files = list(
+                (
+                    await session.scalars(
+                        select(StoredFile)
+                        .where(
+                            StoredFile.attached_at.is_(None),
+                            StoredFile.created_at < unused_files_before,
+                            or_(
+                                StoredFile.cleanup_claimed_at.is_(None),
+                                StoredFile.cleanup_claimed_at < stale_claim,
+                            ),
+                        )
+                        .order_by(StoredFile.created_at)
+                        .limit(file_limit)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            claimed_at = utcnow()
+            for stored_file in files:
+                stored_file.cleanup_claimed_at = claimed_at
+            return [
+                FileCleanupTarget(
+                    id=stored_file.id,
+                    storage_key=stored_file.storage_key,
+                )
+                for stored_file in files
+            ]
+
+    async def finish_file_cleanup(self, file_ids: Iterable[str]) -> None:
+        ids = list(dict.fromkeys(file_ids))
+        if not ids:
+            return
+        async with self.sessions.begin() as session:
+            await session.execute(
+                delete(StoredFile)
+                .where(
+                    StoredFile.id.in_(ids),
+                    StoredFile.attached_at.is_(None),
+                    StoredFile.cleanup_claimed_at.is_not(None),
+                )
+            )
+
+    async def release_file_cleanup(self, file_ids: Iterable[str]) -> None:
+        ids = list(dict.fromkeys(file_ids))
+        if not ids:
+            return
+        async with self.sessions.begin() as session:
+            await session.execute(
+                update(StoredFile)
+                .where(
+                    StoredFile.id.in_(ids),
+                    StoredFile.attached_at.is_(None),
+                )
+                .values(cleanup_claimed_at=None)
+            )

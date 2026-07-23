@@ -1,11 +1,14 @@
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from support_bot.omnichannel.api import create_app
+from support_bot.omnichannel.api import _web_origin, create_app
+from support_bot.omnichannel.enums import Channel, SenderType
 from support_bot.omnichannel.settings import OmnichannelSettings
 from support_bot.omnichannel.storage import OmnichannelStore
 
@@ -273,6 +276,22 @@ class OmnichannelApiTests(TestCase):
         )
         self.assertEqual(disguised.status_code, 415)
 
+    def test_failed_file_metadata_write_removes_physical_file(self) -> None:
+        session = self._session(display_name="Иван")
+        self.app.state.store.create_stored_file = AsyncMock(
+            side_effect=RuntimeError("database unavailable")
+        )
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            self.client.post(
+                "/api/v1/files",
+                headers={
+                    "Authorization": f"Bearer {session['token']}"
+                },
+                files={"upload": ("problem.txt", b"details", "text/plain")},
+            )
+        upload_dir = Path(self.temp_dir.name) / "uploads"
+        self.assertEqual(list(upload_dir.iterdir()), [])
+
     def test_write_models_reject_unknown_fields(self) -> None:
         response = self.client.post(
             "/api/v1/widget/sessions",
@@ -284,6 +303,50 @@ class OmnichannelApiTests(TestCase):
             json={"metadata": {"value": "x" * (8 * 1024)}},
         )
         self.assertEqual(oversized.status_code, 422)
+
+    def test_web_origin_is_bounded_for_maximum_input(self) -> None:
+        origin = _web_origin("operator-" + ("x" * 1000), "k" * 255)
+        self.assertLessEqual(len(origin), 255)
+        self.assertEqual(origin, _web_origin("operator-" + ("x" * 1000), "k" * 255))
+        self.assertNotEqual(origin, _web_origin("other", "k" * 255))
+
+    def test_structured_telegram_content_is_returned_by_rest_api(self) -> None:
+        session = self._session(display_name="Иван")
+
+        async def seed_structured_message() -> None:
+            conversation = await self.store.get_conversation(
+                session["conversation_id"]
+            )
+            await self.app.state.service.create_message(
+                conversation=conversation,
+                sender_type=SenderType.OPERATOR,
+                sender_id="telegram-operator",
+                origin_channel=Channel.TELEGRAM_OPERATOR,
+                origin_external_id="-1001:44",
+                text=None,
+                metadata={
+                    "structured_content": {
+                        "type": "location",
+                        "data": {
+                            "latitude": 55.75,
+                            "longitude": 37.61,
+                        },
+                    }
+                },
+            )
+
+        self.client.portal.call(seed_structured_message)
+        history = self.client.get(
+            f"/api/v1/conversations/{session['conversation_id']}/messages",
+            headers={"Authorization": f"Bearer {session['token']}"},
+        )
+        self.assertEqual(history.status_code, 200, history.text)
+        message = history.json()["items"][0]
+        self.assertEqual(message["kind"], "structured")
+        self.assertEqual(
+            message["structured_content"]["data"]["longitude"],
+            37.61,
+        )
 
     def test_websocket_rejects_non_object_auth_frame(self) -> None:
         with self.assertRaises(WebSocketDisconnect) as caught:
@@ -345,3 +408,20 @@ class OmnichannelApiTests(TestCase):
                 response.json()["id"],
             )
             self.assertGreater(replayed["event_id"], cursor)
+
+    def test_idle_websocket_does_not_poll_database(self) -> None:
+        session = self._session(display_name="Иван")
+        original = self.store.list_realtime_events
+        self.store.list_realtime_events = AsyncMock(wraps=original)
+        with self.client.websocket_connect("/api/v1/ws") as websocket:
+            websocket.send_json(
+                {"type": "auth", "token": session["token"]}
+            )
+            self.assertEqual(websocket.receive_json()["type"], "ready")
+            time.sleep(1.1)
+            websocket.send_text("ping")
+            self.assertEqual(websocket.receive_text(), "pong")
+            self.assertLessEqual(
+                self.store.list_realtime_events.await_count,
+                2,
+            )

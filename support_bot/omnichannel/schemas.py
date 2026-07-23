@@ -4,7 +4,7 @@ import datetime as dt
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasPath, BaseModel, ConfigDict, Field, field_validator
 
 from support_bot.omnichannel.enums import ConversationStatus
 
@@ -71,6 +71,13 @@ class MessageView(BaseModel):
     origin_channel: str
     kind: str
     text: str | None
+    structured_content: dict[str, Any] | None = Field(
+        default=None,
+        validation_alias=AliasPath(
+            "metadata_json",
+            "structured_content",
+        ),
+    )
     reply_to_message_id: str | None
     attachments_json: list[dict[str, Any]]
     created_at: dt.datetime

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
+
+import asyncpg
+
+
+log = logging.getLogger(__name__)
 
 
 class RealtimeHub:
@@ -47,3 +53,47 @@ class RealtimeHub:
                 except asyncio.QueueEmpty:
                     pass
             queue.put_nowait(event)
+
+
+class PostgresRealtimeListener:
+    def __init__(
+        self,
+        database_url: str,
+        hub: RealtimeHub,
+        *,
+        channel: str = "support_realtime",
+    ) -> None:
+        self._dsn = database_url.replace(
+            "postgresql+asyncpg://",
+            "postgresql://",
+            1,
+        )
+        self._hub = hub
+        self._channel = channel
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            connection: asyncpg.Connection | None = None
+            try:
+                connection = await asyncpg.connect(self._dsn)
+
+                def wake(*_: Any) -> None:
+                    asyncio.create_task(
+                        self._hub.publish({"*"}, {"type": "wake"})
+                    )
+
+                await connection.add_listener(self._channel, wake)
+                await self._hub.publish({"*"}, {"type": "wake"})
+                await stop_event.wait()
+                await connection.remove_listener(self._channel, wake)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("PostgreSQL realtime listener failed")
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    pass
+            finally:
+                if connection is not None and not connection.is_closed():
+                    await connection.close()

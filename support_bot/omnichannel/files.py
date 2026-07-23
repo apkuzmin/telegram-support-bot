@@ -103,3 +103,6 @@ class LocalFileStore:
         if path.parent != self.root:
             raise ValueError("Invalid storage key")
         return path
+
+    def delete(self, storage_key: str) -> None:
+        self.path_for(storage_key).unlink(missing_ok=True)

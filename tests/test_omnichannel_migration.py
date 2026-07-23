@@ -1,9 +1,12 @@
 import tempfile
 from unittest import IsolatedAsyncioTestCase
 
+from sqlalchemy import func, select
+
 from support_bot.db import Database
 from support_bot.omnichannel.enums import Channel
 from support_bot.omnichannel.migrate_legacy import migrate_legacy
+from support_bot.omnichannel.models import Conversation, Message
 from support_bot.omnichannel.storage import OmnichannelStore
 
 
@@ -89,5 +92,59 @@ class LegacyMigrationTests(IsolatedAsyncioTestCase):
                     channel=Channel.TELEGRAM_OPERATOR,
                 )
                 self.assertEqual(delivery.external_message_id, "99")
+            finally:
+                await migrated.close()
+
+    async def test_closed_legacy_import_is_idempotent(self) -> None:
+        with (
+            tempfile.NamedTemporaryFile(suffix=".sqlite3") as legacy_file,
+            tempfile.NamedTemporaryFile(suffix=".sqlite3") as target_file,
+        ):
+            legacy = Database(legacy_file.name)
+            await legacy.connect()
+            try:
+                await legacy.init()
+                await legacy.log_user_message(
+                    user_id=42,
+                    username="ivan",
+                    first_name="Иван",
+                    last_name=None,
+                    direction="user",
+                    chat_id=42,
+                    message_id=10,
+                    content_type="text",
+                    text="Закрытая история",
+                    caption=None,
+                    file_id=None,
+                    payload_json='{"text":"Закрытая история"}',
+                )
+                await legacy.set_conversation(42, 77, active=False)
+            finally:
+                await legacy.close()
+
+            target_url = f"sqlite+aiosqlite:///{target_file.name}"
+            target = OmnichannelStore(target_url)
+            await target.create_schema()
+            await target.close()
+            await migrate_legacy(
+                legacy_path=legacy_file.name,
+                database_url=target_url,
+            )
+            await migrate_legacy(
+                legacy_path=legacy_file.name,
+                database_url=target_url,
+            )
+
+            migrated = OmnichannelStore(target_url)
+            try:
+                async with migrated.sessions() as session:
+                    conversations = await session.scalar(
+                        select(func.count()).select_from(Conversation)
+                    )
+                    messages = await session.scalar(
+                        select(func.count()).select_from(Message)
+                    )
+                self.assertEqual(conversations, 1)
+                self.assertEqual(messages, 1)
             finally:
                 await migrated.close()

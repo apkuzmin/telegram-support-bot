@@ -16,8 +16,9 @@ The canonical message is written once to `support_messages`. Copies in a
 Telegram topic, Telegram private chat or website connection are tracked in
 `support_message_deliveries`. `support_outbox` makes canonical enqueue
 idempotent and Telegram delivery retryable. `support_realtime_events` lets API
-and Telegram run
-in separate processes while WebSocket clients reconnect using an event cursor.
+and Telegram run in separate processes while WebSocket clients reconnect using
+an event cursor. PostgreSQL emits one `NOTIFY` per durable event; one API
+listener wakes local WebSocket clients without per-connection database polling.
 
 ## Start locally
 
@@ -69,7 +70,8 @@ For a backend written in another language, use any JWT library with algorithm
 `HS256`, audience `support-module`, and claims `sub`, `role`, `iat`, `exp`.
 The `identity` and operator tokens do not contain `conversation_id`; customer
 tokens returned by this module do. Reject algorithm substitution and validate
-the audience and expiration on every request.
+the audience and expiration on every request. `sub` is limited to 200
+characters by the module contract.
 
 There are four token roles:
 
@@ -154,6 +156,9 @@ The frontend must generate one stable `idempotency_key` for each user send
 action and reuse it after a timeout. Repeating the same request returns the
 original message instead of creating a duplicate.
 
+The module hashes the authenticated subject and idempotency key into a bounded
+internal origin ID, so maximum-length valid keys are safe on PostgreSQL.
+
 ## Operator API flow
 
 - List/search/filter:
@@ -193,6 +198,21 @@ Message responses include `deliveries`. Operator responses include retry
 attempts and the last delivery error; customer responses omit internal error
 details. A failed/dead delivery can be manually queued again with
 `POST /api/v1/operator/deliveries/{delivery_id}/retry`.
+Failed Telegram edit synchronization is represented by the same delivery:
+retry repeats the edit at the original Telegram message instead of sending a
+duplicate.
+
+Telegram contacts, locations, venues, polls, dice and games include an
+additive `structured_content` object:
+
+```json
+{
+  "type": "location",
+  "data": {"latitude": 55.75, "longitude": 37.61}
+}
+```
+
+The integrating site decides how each structured type is rendered.
 
 ## Realtime contract
 
@@ -238,8 +258,10 @@ After receiving an event, fetch messages after the last rendered
 `sequence`. Events are signals, not the source of message content.
 
 On reconnect pass `after_event_id=<last processed event_id>`. The server reads
-missed durable events from PostgreSQL. If the client no longer has a cursor,
-reconnect without it and refresh the relevant histories through REST.
+missed durable events from PostgreSQL. Events are retained for
+`SUPPORT_REALTIME_RETENTION_SECONDS` (seven days by default). If the client no
+longer has a cursor within that window, reconnect without it and refresh the
+relevant histories through REST.
 
 Send text `ping` to receive `pong`.
 
@@ -258,6 +280,12 @@ Use the returned file IDs in `attachment_ids`. Download through
 to files owned by that customer. `SUPPORT_MAX_UPLOAD_BYTES` applies while
 streaming; partial files are removed after an error.
 
+Upload IDs are single-use and become attached atomically with canonical
+message creation. Unattached uploads older than
+`SUPPORT_UNUSED_FILE_RETENTION_SECONDS` are claimed and removed by maintenance.
+Failed physical deletion is released for a later retry. Completed outbox rows
+are retained for `SUPPORT_OUTBOX_RETENTION_SECONDS`.
+
 `LocalFileStore` is the default adapter. Replace it with an S3-compatible
 implementation in production when API and Telegram workers do not share a
 filesystem. Active browser content such as HTML, JavaScript and SVG is rejected
@@ -275,6 +303,8 @@ the module accepts files from untrusted public traffic.
   customer channel.
 - Website operator replies are mirrored into the topic and delivered to the
   customer channel.
+- Website text is sent as plain text and split into ordered Telegram-safe
+  chunks, so customer input is never interpreted as bot HTML.
 - Bot-authored topic messages are ignored on ingress, preventing loops.
 - Closed or missing delivery attempts remain in outbox retry state rather than
   disappearing.
@@ -296,9 +326,10 @@ python -m support_bot.omnichannel.migrate_legacy \
   --database-url postgresql+asyncpg://support:password@localhost/support
 ```
 
-The importer is idempotent. It keeps Telegram user identities, active topic
-IDs, logged messages and reply-copy mappings. Imported history does not enter
-the outbox, so old messages are not sent again.
+The importer is idempotent for active and closed legacy dialogs and resolves
+them by stable Telegram topic ID. It keeps Telegram identities, topic IDs,
+logged messages and reply-copy mappings. Imported history does not enter the
+outbox, so old messages are not sent again.
 
 ## Verification
 
@@ -314,8 +345,13 @@ Local PostgreSQL/API/WebSocket smoke:
 docker compose up -d --build postgres api
 python -m scripts.smoke_headless \
   --base-url http://127.0.0.1:8080 \
-  --secret "$SUPPORT_AUTH_SECRET"
+  --secret "$SUPPORT_AUTH_SECRET" \
+  --database-url \
+    postgresql+asyncpg://support:support-local-password@127.0.0.1:54329/support
 ```
 
 The smoke test creates a customer session, receives a WebSocket event, sends a
-customer message, sends an operator reply and verifies ordered history.
+customer message, sends an operator reply and verifies ordered history. When
+`--database-url` is set, it also inserts a realtime event through a separate
+database connection and verifies the full PostgreSQL trigger, `LISTEN/NOTIFY`
+and WebSocket delivery path.

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import SendMessage
-from aiogram.types import Chat, Message, User
+from aiogram.types import Chat, Location, Message, User
 
 from support_bot.omnichannel.enums import (
     Channel,
@@ -16,6 +16,7 @@ from support_bot.omnichannel.enums import (
 )
 from support_bot.omnichannel.files import LocalFileStore
 from support_bot.omnichannel.realtime import RealtimeHub
+from support_bot.omnichannel.schemas import MessageView
 from support_bot.omnichannel.service import SupportService
 from support_bot.omnichannel.storage import OmnichannelStore
 from support_bot.omnichannel.telegram_bridge import TelegramBridge
@@ -143,6 +144,61 @@ class TelegramBridgeTests(IsolatedAsyncioTestCase):
             chat_id=-1001,
             message_id=101,
             text="Исправлено в Telegram",
+            parse_mode=None,
+        )
+
+    async def test_web_text_is_plain_and_split_to_telegram_limits(self) -> None:
+        session = await self.service.create_web_session(
+            external_user_id="site:42",
+            display_name="Иван",
+        )
+        await self.store.set_telegram_topic(
+            session.context.conversation.id,
+            77,
+        )
+        text = "2 < 3 & support\n" + ("😀" * 5000)
+        await self.service.create_message(
+            conversation=session.context.conversation,
+            sender_type=SenderType.CUSTOMER,
+            sender_id=session.context.customer.id,
+            origin_channel=Channel.WEB_USER,
+            origin_external_id="web-long-plain-text",
+            text=text,
+        )
+        self.bot.send_message.side_effect = None
+        self.bot.send_message.return_value = SimpleNamespace(message_id=300)
+        events = await self.store.claim_outbox()
+        await self.bridge.process_outbox_event(events[0])
+
+        calls = self.bot.send_message.await_args_list
+        self.assertGreater(len(calls), 2)
+        delivered = "".join(call.kwargs["text"] for call in calls)
+        self.assertEqual(delivered, text)
+        self.assertTrue(
+            all(
+                len(call.kwargs["text"].encode("utf-16-le")) // 2 <= 4096
+                for call in calls
+            )
+        )
+        self.assertTrue(
+            all(call.kwargs["parse_mode"] is None for call in calls)
+        )
+
+    async def test_structured_telegram_message_is_exposed_to_api_model(self) -> None:
+        telegram_message = Message(
+            message_id=44,
+            date=dt.datetime.now(dt.timezone.utc),
+            chat=Chat(id=42, type=ChatType.PRIVATE),
+            from_user=User(id=42, is_bot=False, first_name="Иван"),
+            location=Location(latitude=55.75, longitude=37.61),
+        )
+        stored = await self.bridge.ingest_customer_message(telegram_message)
+        view = MessageView.model_validate(stored)
+        self.assertEqual(view.kind, "structured")
+        self.assertEqual(view.structured_content["type"], "location")
+        self.assertEqual(
+            view.structured_content["data"]["latitude"],
+            55.75,
         )
 
     async def test_web_delivery_is_completed_without_telegram_send(self) -> None:
@@ -297,3 +353,55 @@ class TelegramBridgeTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(delivery.status, DeliveryStatus.SENT.value)
         self.assertEqual(delivery.external_message_id, "109")
+
+    async def test_edit_failure_is_visible_and_manual_retry_repeats_edit(
+        self,
+    ) -> None:
+        session = await self.service.create_web_session(
+            external_user_id="site:42",
+            display_name="Иван",
+        )
+        await self.store.set_telegram_topic(
+            session.context.conversation.id,
+            77,
+        )
+        message, _ = await self.service.create_message(
+            conversation=session.context.conversation,
+            sender_type=SenderType.CUSTOMER,
+            sender_id=session.context.customer.id,
+            origin_channel=Channel.WEB_USER,
+            origin_external_id="web-edit-failure",
+            text="До правки",
+        )
+        self.bot.send_message.side_effect = None
+        self.bot.send_message.return_value = SimpleNamespace(message_id=300)
+        delivery_event = (await self.store.claim_outbox())[0]
+        await self.bridge.process_outbox_event(delivery_event)
+        delivery_id = str(delivery_event.payload_json["delivery_id"])
+
+        await self.store.update_message_text(
+            message.id,
+            text_value="После правки",
+        )
+        edit_event = (await self.store.claim_outbox())[0]
+        self.bot.edit_message_text.side_effect = TelegramBadRequest(
+            method=SendMessage(chat_id=-1001, text="x"),
+            message="message cannot be edited",
+        )
+        await self.bridge.process_outbox_event(edit_event)
+        failed = await self.store.get_delivery(delivery_id)
+        self.assertEqual(failed.status, DeliveryStatus.FAILED.value)
+        self.assertIn("cannot be edited", failed.last_error)
+
+        await self.store.retry_delivery(delivery_id)
+        retry_event = (await self.store.claim_outbox())[0]
+        self.assertEqual(
+            retry_event.event_type,
+            "message.delivery.edit_requested",
+        )
+        self.bot.edit_message_text.side_effect = None
+        self.bot.edit_message_text.return_value = True
+        await self.bridge.process_outbox_event(retry_event)
+        sent = await self.store.get_delivery(delivery_id)
+        self.assertEqual(sent.status, DeliveryStatus.SENT.value)
+        self.assertIsNone(sent.last_error)

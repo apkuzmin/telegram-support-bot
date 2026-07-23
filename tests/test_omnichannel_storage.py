@@ -9,7 +9,12 @@ from support_bot.omnichannel.enums import (
     DeliveryStatus,
     SenderType,
 )
-from support_bot.omnichannel.models import MessageDelivery, OutboxEvent
+from support_bot.omnichannel.models import (
+    MessageDelivery,
+    OutboxEvent,
+    RealtimeEvent,
+    StoredFile,
+)
 from support_bot.omnichannel.realtime import RealtimeHub
 from support_bot.omnichannel.service import SupportService
 from support_bot.omnichannel.storage import OmnichannelStore
@@ -204,3 +209,74 @@ class OmnichannelStorageTests(IsolatedAsyncioTestCase):
             old_event.last_error,
             "Superseded by manual retry",
         )
+
+    async def test_cleanup_removes_only_expired_unattached_files_and_events(
+        self,
+    ) -> None:
+        created = await self.service.create_web_session(
+            external_user_id="site:42",
+            display_name="Иван",
+        )
+        unused = await self.store.create_stored_file(
+            customer_id=created.context.customer.id,
+            original_name="unused.txt",
+            content_type="text/plain",
+            size_bytes=1,
+            sha256="a" * 64,
+            storage_key="unused-key",
+        )
+        attached = await self.store.create_stored_file(
+            customer_id=created.context.customer.id,
+            original_name="attached.txt",
+            content_type="text/plain",
+            size_bytes=1,
+            sha256="b" * 64,
+            storage_key="attached-key",
+        )
+        await self.service.create_message(
+            conversation=created.context.conversation,
+            sender_type=SenderType.CUSTOMER,
+            sender_id=created.context.customer.id,
+            origin_channel=Channel.WEB_USER,
+            origin_external_id="request-with-file",
+            text="Файл",
+            attachments=[{"id": attached.id}],
+        )
+        old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)
+        async with self.store.sessions.begin() as session:
+            db_unused = await session.get(StoredFile, unused.id)
+            db_attached = await session.get(StoredFile, attached.id)
+            db_unused.created_at = old
+            db_attached.created_at = old
+            event = await session.scalar(select(OutboxEvent))
+            event.status = DeliveryStatus.SENT.value
+            event.created_at = old
+            realtime = await session.scalar(select(RealtimeEvent))
+            realtime.created_at = old
+
+        cleanup_targets = await self.store.cleanup_expired(
+            realtime_before=dt.datetime.now(dt.timezone.utc),
+            outbox_before=dt.datetime.now(dt.timezone.utc),
+            unused_files_before=dt.datetime.now(dt.timezone.utc),
+        )
+        self.assertEqual(
+            [target.storage_key for target in cleanup_targets],
+            ["unused-key"],
+        )
+        async with self.store.sessions() as session:
+            claimed = await session.get(StoredFile, unused.id)
+            self.assertIsNotNone(claimed.cleanup_claimed_at)
+        await self.store.finish_file_cleanup(
+            [target.id for target in cleanup_targets]
+        )
+        async with self.store.sessions() as session:
+            self.assertIsNone(await session.get(StoredFile, unused.id))
+            self.assertIsNotNone(await session.get(StoredFile, attached.id))
+            outbox_count = await session.scalar(
+                select(func.count()).select_from(OutboxEvent)
+            )
+            realtime_count = await session.scalar(
+                select(func.count()).select_from(RealtimeEvent)
+            )
+        self.assertEqual(outbox_count, 0)
+        self.assertEqual(realtime_count, 0)

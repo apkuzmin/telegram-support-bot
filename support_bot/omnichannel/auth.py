@@ -13,6 +13,9 @@ class AuthError(ValueError):
     pass
 
 
+MAX_SUBJECT_LENGTH = 200
+
+
 def _b64_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
@@ -53,6 +56,10 @@ class TokenSigner:
     ) -> str:
         if not subject or not role:
             raise ValueError("Token subject and role are required")
+        if len(subject) > MAX_SUBJECT_LENGTH:
+            raise ValueError(
+                f"Token subject exceeds {MAX_SUBJECT_LENGTH} characters"
+            )
         if ttl_seconds <= 0:
             raise ValueError("Token TTL must be positive")
         issued_at = int(time.time()) if now is None else now
@@ -131,6 +138,7 @@ class TokenSigner:
         if (
             not isinstance(subject_value, str)
             or not subject_value
+            or len(subject_value) > MAX_SUBJECT_LENGTH
             or not isinstance(role_value, str)
             or not role_value
         ):

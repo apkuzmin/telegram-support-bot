@@ -17,6 +17,10 @@ class OmnichannelSettings:
     trusted_hosts: tuple[str, ...] = ()
     expose_docs: bool = True
     websocket_idle_seconds: int = 300
+    realtime_retention_seconds: int = 7 * 24 * 60 * 60
+    outbox_retention_seconds: int = 30 * 24 * 60 * 60
+    unused_file_retention_seconds: int = 24 * 60 * 60
+    maintenance_interval_seconds: int = 60 * 60
 
     @classmethod
     def from_env(cls) -> "OmnichannelSettings":
@@ -71,5 +75,26 @@ class OmnichannelSettings:
             expose_docs=expose_docs,
             websocket_idle_seconds=int(
                 os.getenv("SUPPORT_WEBSOCKET_IDLE_SECONDS", "300")
+            ),
+            realtime_retention_seconds=int(
+                os.getenv(
+                    "SUPPORT_REALTIME_RETENTION_SECONDS",
+                    str(7 * 24 * 60 * 60),
+                )
+            ),
+            outbox_retention_seconds=int(
+                os.getenv(
+                    "SUPPORT_OUTBOX_RETENTION_SECONDS",
+                    str(30 * 24 * 60 * 60),
+                )
+            ),
+            unused_file_retention_seconds=int(
+                os.getenv(
+                    "SUPPORT_UNUSED_FILE_RETENTION_SECONDS",
+                    str(24 * 60 * 60),
+                )
+            ),
+            maintenance_interval_seconds=int(
+                os.getenv("SUPPORT_MAINTENANCE_INTERVAL_SECONDS", "3600")
             ),
         )

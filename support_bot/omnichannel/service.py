@@ -96,7 +96,12 @@ class SupportService:
         attachments: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> tuple[Message, bool]:
-        kind = MessageKind.FILE if attachments and not text else MessageKind.TEXT
+        if metadata and metadata.get("structured_content") and not text:
+            kind = MessageKind.STRUCTURED
+        elif attachments and not text:
+            kind = MessageKind.FILE
+        else:
+            kind = MessageKind.TEXT
         message, created = await self.store.create_message(
             conversation_id=conversation.id,
             sender_type=sender_type,
@@ -114,4 +119,16 @@ class SupportService:
                 origin_channel=origin_channel,
             ),
         )
+        if created:
+            await self.realtime.publish(
+                {
+                    "operators",
+                    f"conversation:{conversation.id}",
+                    f"customer:{conversation.customer_id}",
+                },
+                {
+                    "type": "wake",
+                    "conversation_id": conversation.id,
+                },
+            )
         return message, created

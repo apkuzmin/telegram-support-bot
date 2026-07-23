@@ -70,3 +70,9 @@ class TokenSignerTests(TestCase):
                 role="customer",
                 ttl_seconds=60,
             )
+        with self.assertRaisesRegex(ValueError, "200"):
+            self.signer.issue(
+                subject="x" * 201,
+                role="customer",
+                ttl_seconds=60,
+            )
