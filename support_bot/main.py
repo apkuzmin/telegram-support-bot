@@ -46,6 +46,7 @@ async def _run() -> None:
         dp.include_router(user_router)
 
         operator_router.message.filter(F.chat.id == config.operator_group_id)
+        operator_router.edited_message.filter(F.chat.id == config.operator_group_id)
         dp.include_router(operator_router)
 
         me = await bot.get_me()

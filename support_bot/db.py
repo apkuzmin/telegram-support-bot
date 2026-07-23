@@ -128,6 +128,7 @@ class Database:
                   file_id      TEXT,
                   payload_json TEXT,
                   created_at   TEXT NOT NULL,
+                  edited_at    TEXT,
                   FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
                 );
 
@@ -162,6 +163,15 @@ class Database:
                   ON message_links(user_id);
                 """
             )
+            columns_cursor = await self.conn.execute("PRAGMA table_info(messages)")
+            message_columns = {
+                str(row[1]) for row in await columns_cursor.fetchall()
+            }
+            await columns_cursor.close()
+            if "edited_at" not in message_columns:
+                await self.conn.execute(
+                    "ALTER TABLE messages ADD COLUMN edited_at TEXT"
+                )
             await self.conn.commit()
 
     async def upsert_user(
@@ -308,6 +318,41 @@ class Database:
                     target_chat_id,
                     target_message_id,
                     _now_iso(),
+                ),
+            )
+
+    async def update_logged_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        content_type: str,
+        text: str | None,
+        caption: str | None,
+        file_id: str | None,
+        payload_json: str | None,
+    ) -> None:
+        async with self._write_operation(commit=True):
+            await self.conn.execute(
+                """
+                UPDATE messages
+                   SET content_type = ?,
+                       text = ?,
+                       caption = ?,
+                       file_id = ?,
+                       payload_json = ?,
+                       edited_at = ?
+                 WHERE chat_id = ? AND message_id = ?
+                """,
+                (
+                    content_type,
+                    text,
+                    caption,
+                    file_id,
+                    payload_json,
+                    _now_iso(),
+                    chat_id,
+                    message_id,
                 ),
             )
 

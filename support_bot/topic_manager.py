@@ -7,9 +7,10 @@ from html import escape
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import LinkPreviewOptions, Message, ReplyParameters, User
+from aiogram.types import LinkPreviewOptions, Message, User
 
 from support_bot.db import Database
+from support_bot.telegram_utils import build_reply_parameters
 
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ class TopicManager:
         self._locks: dict[int, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
 
+    @property
+    def operator_group_id(self) -> int:
+        return self._operator_group_id
+
     async def _lock_for(self, user_id: int) -> asyncio.Lock:
         async with self._locks_guard:
             lock = self._locks.get(user_id)
@@ -104,9 +109,10 @@ class TopicManager:
         except TelegramAPIError as err:
             raise self._delivery_error(message, err, stage="create_or_find_topic") from err
 
-        reply_params = await self._build_reply_params(
+        reply_params = await build_reply_parameters(
+            self._db,
             source_chat_id=message.chat.id,
-            source_message=message.reply_to_message,
+            source_message=message,
             target_chat_id=self._operator_group_id,
         )
         try:
@@ -222,27 +228,6 @@ class TopicManager:
         )
         return MessageDeliveryError(
             f"Unable to deliver message {message.message_id} at stage {stage}"
-        )
-
-    async def _build_reply_params(
-        self,
-        *,
-        source_chat_id: int,
-        source_message: Message | None,
-        target_chat_id: int,
-    ) -> ReplyParameters | None:
-        if source_message is None:
-            return None
-        target_message_id = await self._db.find_linked_message_id(
-            source_chat_id=source_chat_id,
-            source_message_id=source_message.message_id,
-            target_chat_id=target_chat_id,
-        )
-        if target_message_id is None:
-            return None
-        return ReplyParameters(
-            message_id=target_message_id,
-            allow_sending_without_reply=True,
         )
 
     async def _log_message_link(

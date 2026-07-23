@@ -1,10 +1,16 @@
 import tempfile
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from support_bot.db import Database
-from support_bot.handlers.user import DELIVERY_ERROR_TEXT, start
+from support_bot.handlers.user import (
+    DELIVERY_ERROR_TEXT,
+    EDIT_ERROR_TEXT,
+    edited_private_message,
+    start,
+)
+from support_bot.message_editor import EditSyncStatus, MessageEditError
 from support_bot.topic_manager import MessageDeliveryError, TopicManager
 
 
@@ -123,3 +129,71 @@ class StartHandlerTests(IsolatedAsyncioTestCase):
                 self.assertEqual(conversation.topic_id, 77)
             finally:
                 await db.close()
+
+    async def test_edited_user_message_updates_history_and_operator_copy(self) -> None:
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42),
+            chat=SimpleNamespace(id=42),
+            message_id=10,
+            content_type="text",
+            text="Исправленный текст",
+            caption=None,
+            photo=None,
+            document=None,
+            video=None,
+            audio=None,
+            voice=None,
+            sticker=None,
+            animation=None,
+            video_note=None,
+        )
+        db = SimpleNamespace(update_logged_message=AsyncMock())
+        topics = SimpleNamespace(operator_group_id=-1001)
+
+        with patch(
+            "support_bot.handlers.user.sync_edited_message",
+            new=AsyncMock(return_value=EditSyncStatus.SYNCED),
+        ) as sync:
+            await edited_private_message(
+                message=message,
+                bot=object(),
+                db=db,
+                topics=topics,
+                log_messages=True,
+            )
+
+        db.update_logged_message.assert_awaited_once_with(
+            chat_id=42,
+            message_id=10,
+            content_type="text",
+            text="Исправленный текст",
+            caption=None,
+            file_id=None,
+            payload_json=None,
+        )
+        sync.assert_awaited_once()
+        self.assertEqual(sync.await_args.kwargs["target_chat_id"], -1001)
+
+    async def test_edited_user_message_reports_sync_failure(self) -> None:
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42),
+            chat=SimpleNamespace(id=42),
+            message_id=10,
+            answer=AsyncMock(),
+        )
+        db = SimpleNamespace()
+        topics = SimpleNamespace(operator_group_id=-1001)
+
+        with patch(
+            "support_bot.handlers.user.sync_edited_message",
+            new=AsyncMock(side_effect=MessageEditError("failed")),
+        ):
+            await edited_private_message(
+                message=message,
+                bot=object(),
+                db=db,
+                topics=topics,
+                log_messages=False,
+            )
+
+        message.answer.assert_awaited_once_with(EDIT_ERROR_TEXT)

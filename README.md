@@ -53,6 +53,29 @@ python -m support_bot
 - Replies are mirrored when the original message exists on the other side.
 - SQLite stores routing and reply links. Message history is stored in SQLite (DB_PATH). Set LOG_MESSAGES=0 to disable history logging.
 
+### Supported Telegram Messages
+
+- Formatted text and media captions, including Telegram message entities
+- Replies and manually selected quoted fragments, including quote formatting
+- Photos, videos, animations, documents, audio, voice messages, video notes, and stickers
+- Contacts, locations, venues, polls, dice, and games
+
+Messages are copied through Telegram's `copyMessage` API in both directions, so
+their original content and formatting are retained. Media-group items are
+delivered, but album grouping is not currently retained because updates are
+processed one message at a time.
+
+Edits are synchronized in both directions for formatted text, media captions,
+and Telegram-editable photo, video, animation, audio, and document messages.
+Voice-message captions are synchronized without replacing the voice file.
+Telegram does not provide edit operations for stickers, video notes, contacts,
+locations, venues, polls, dice, or games, so those copied messages cannot be
+updated in place.
+
+Telegram does not allow bots to copy service messages, paid media, giveaways,
+giveaway winners, or invoices. Quiz polls can be copied only when Telegram has
+provided the correct answer to the bot.
+
 ### Notes
 The bot works only with supergroups that have Topics (Forum) enabled.
 If topics are not being created, check that the bot has the Manage Topics permission.

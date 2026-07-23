@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import tempfile
 from unittest import IsolatedAsyncioTestCase
 
@@ -96,5 +97,85 @@ class DatabaseConcurrencyTests(IsolatedAsyncioTestCase):
                         "Use commit=False inside Database.transaction",
                     ):
                         await db.upsert_user(1, "one", "One", None)
+            finally:
+                await db.close()
+
+    async def test_logged_message_is_updated_after_edit(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            db = Database(db_file.name)
+            await db.connect()
+            try:
+                await db.init()
+                await db.log_user_message(
+                    user_id=1,
+                    username="one",
+                    first_name="One",
+                    last_name=None,
+                    direction="user",
+                    chat_id=1,
+                    message_id=10,
+                    content_type="text",
+                    text="До изменения",
+                    caption=None,
+                    file_id=None,
+                    payload_json='{"text":"До изменения"}',
+                )
+
+                await db.update_logged_message(
+                    chat_id=1,
+                    message_id=10,
+                    content_type="text",
+                    text="После изменения",
+                    caption=None,
+                    file_id=None,
+                    payload_json='{"text":"После изменения"}',
+                )
+
+                cursor = await db.conn.execute(
+                    """
+                    SELECT text, payload_json, edited_at
+                      FROM messages
+                     WHERE chat_id = 1 AND message_id = 10
+                    """
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                self.assertEqual(row[0], "После изменения")
+                self.assertEqual(row[1], '{"text":"После изменения"}')
+                self.assertIsNotNone(row[2])
+            finally:
+                await db.close()
+
+    async def test_existing_messages_table_gets_edited_at_column(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db_file:
+            legacy = sqlite3.connect(db_file.name)
+            legacy.execute(
+                """
+                CREATE TABLE messages (
+                  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id      INTEGER NOT NULL,
+                  direction    TEXT NOT NULL,
+                  chat_id      INTEGER NOT NULL,
+                  message_id   INTEGER NOT NULL,
+                  content_type TEXT NOT NULL,
+                  text         TEXT,
+                  caption      TEXT,
+                  file_id      TEXT,
+                  payload_json TEXT,
+                  created_at   TEXT NOT NULL
+                )
+                """
+            )
+            legacy.commit()
+            legacy.close()
+
+            db = Database(db_file.name)
+            await db.connect()
+            try:
+                await db.init()
+                cursor = await db.conn.execute("PRAGMA table_info(messages)")
+                columns = {row[1] for row in await cursor.fetchall()}
+                await cursor.close()
+                self.assertIn("edited_at", columns)
             finally:
                 await db.close()

@@ -6,6 +6,7 @@ from aiogram.types import Message
 
 from support_bot.config import DEFAULT_START_MESSAGE
 from support_bot.db import Database
+from support_bot.message_editor import MessageEditError, sync_edited_message
 from support_bot.telegram_utils import extract_file_id, safe_payload_json
 from support_bot.topic_manager import MessageDeliveryError, TopicManager
 
@@ -14,6 +15,10 @@ router = Router(name="user")
 DELIVERY_ERROR_TEXT = (
     "Не удалось передать сообщение службе поддержки. "
     "Пожалуйста, попробуйте ещё раз немного позже."
+)
+EDIT_ERROR_TEXT = (
+    "Сообщение изменено, но не удалось обновить его копию у службы поддержки. "
+    "Пожалуйста, отправьте исправленный текст новым сообщением."
 )
 
 
@@ -86,3 +91,36 @@ async def any_private_message(
 
     await _store_user_message(db, message, log_messages=log_messages)
     await _copy_to_operator_topic(message, bot, topics)
+
+
+@router.edited_message(F.chat.type == "private")
+async def edited_private_message(
+    message: Message,
+    bot: Bot,
+    db: Database,
+    topics: TopicManager,
+    log_messages: bool = True,
+) -> None:
+    if message.from_user is None:
+        return
+
+    if log_messages:
+        await db.update_logged_message(
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            content_type=message.content_type,
+            text=message.text,
+            caption=message.caption,
+            file_id=extract_file_id(message),
+            payload_json=safe_payload_json(message),
+        )
+
+    try:
+        await sync_edited_message(
+            bot,
+            db,
+            source_message=message,
+            target_chat_id=topics.operator_group_id,
+        )
+    except MessageEditError:
+        await message.answer(EDIT_ERROR_TEXT)
