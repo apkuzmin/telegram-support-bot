@@ -26,3 +26,42 @@ class ConfigTests(TestCase):
             config = load_config()
 
         self.assertEqual(config.start_message, "Configured welcome")
+
+    def test_admin_bridge_is_disabled_by_default(self) -> None:
+        env = {
+            "BOT_TOKEN": "test-token",
+            "OPERATOR_GROUP_ID": "-1001",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = load_config()
+
+        self.assertFalse(config.admin_bridge_enabled)
+
+    def test_admin_bridge_requires_complete_valid_configuration(self) -> None:
+        base_env = {
+            "BOT_TOKEN": "test-token",
+            "OPERATOR_GROUP_ID": "-1001",
+        }
+        with patch.dict(
+            os.environ,
+            {**base_env, "ADMIN_BRIDGE_URL": "http://127.0.0.1:8080"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "must be set together"):
+                load_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                **base_env,
+                "ADMIN_BRIDGE_URL": "http://127.0.0.1:8080",
+                "ADMIN_BRIDGE_TOKEN": "x" * 64,
+                "ADMIN_BRIDGE_BOT_INSTANCE_ID": (
+                    "00000000-0000-0000-0000-000000000002"
+                ),
+            },
+            clear=True,
+        ):
+            config = load_config()
+
+        self.assertTrue(config.admin_bridge_enabled)

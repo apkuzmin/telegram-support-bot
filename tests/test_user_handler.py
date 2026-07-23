@@ -7,6 +7,7 @@ from support_bot.db import Database
 from support_bot.handlers.user import (
     DELIVERY_ERROR_TEXT,
     EDIT_ERROR_TEXT,
+    any_private_message,
     edited_private_message,
     start,
 )
@@ -31,6 +32,8 @@ class StartHandlerTests(IsolatedAsyncioTestCase):
             log_user_message=AsyncMock(),
         )
         topics = SimpleNamespace(copy_user_message_to_topic=AsyncMock())
+        topics.copy_user_message_to_topic.return_value = SimpleNamespace(topic_id=77)
+        admin_bridge = SimpleNamespace(publish_user_message=AsyncMock())
         bot = object()
 
         await start(
@@ -40,6 +43,7 @@ class StartHandlerTests(IsolatedAsyncioTestCase):
             topics=topics,
             log_messages=False,
             start_message="Configured welcome",
+            admin_bridge=admin_bridge,
         )
 
         message.answer.assert_awaited_once_with("Configured welcome")
@@ -51,6 +55,41 @@ class StartHandlerTests(IsolatedAsyncioTestCase):
         )
         db.log_user_message.assert_not_awaited()
         topics.copy_user_message_to_topic.assert_awaited_once_with(bot, message)
+        admin_bridge.publish_user_message.assert_awaited_once_with(
+            message, 77, db
+        )
+
+    async def test_private_message_is_published_after_topic_delivery(self) -> None:
+        user = SimpleNamespace(
+            id=42,
+            username="ivan",
+            first_name="Иван",
+            last_name="Иванов",
+        )
+        message = SimpleNamespace(from_user=user)
+        db = SimpleNamespace(
+            upsert_user=AsyncMock(),
+            log_user_message=AsyncMock(),
+        )
+        topics = SimpleNamespace(
+            copy_user_message_to_topic=AsyncMock(
+                return_value=SimpleNamespace(topic_id=77)
+            )
+        )
+        admin_bridge = SimpleNamespace(publish_user_message=AsyncMock())
+
+        await any_private_message(
+            message=message,
+            bot=object(),
+            db=db,
+            topics=topics,
+            log_messages=False,
+            admin_bridge=admin_bridge,
+        )
+
+        admin_bridge.publish_user_message.assert_awaited_once_with(
+            message, 77, db
+        )
 
     async def test_start_reports_delivery_failure_without_success_greeting(self) -> None:
         user = SimpleNamespace(

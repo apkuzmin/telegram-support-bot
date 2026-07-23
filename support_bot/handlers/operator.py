@@ -6,6 +6,7 @@ from aiogram import Bot, Router, F
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.types import Message
 
+from support_bot.admin_bridge import AdminSupportBridge
 from support_bot.db import Database
 from support_bot.message_editor import MessageEditError, sync_edited_message
 from support_bot.telegram_utils import (
@@ -19,7 +20,13 @@ router = Router(name="operator")
 
 
 @router.message(F.is_topic_message.is_(True))
-async def topic_message_to_user(message: Message, bot: Bot, db: Database, log_messages: bool = True) -> None:
+async def topic_message_to_user(
+    message: Message,
+    bot: Bot,
+    db: Database,
+    log_messages: bool = True,
+    admin_bridge: AdminSupportBridge | None = None,
+) -> None:
     if message.from_user is None:
         return
     if message.from_user.is_bot:
@@ -79,6 +86,9 @@ async def topic_message_to_user(message: Message, bot: Bot, db: Database, log_me
             target_message_id=message.message_id,
             commit=False,
         )
+
+    if admin_bridge is not None:
+        await admin_bridge.publish_operator_message(message, user_id, db)
 
     if not log_messages:
         return

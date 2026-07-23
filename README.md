@@ -20,6 +20,8 @@ For each user, the bot automatically creates a **separate forum topic** and mirr
 - Bidirectional message forwarding (**user ↔ operators**)
 - Telegram text formatting is preserved in both directions
 - Reply mirroring across chats (reply in topic ↔ reply in private chat)
+- Optional HTTP bridge for an external support dashboard, with durable retries
+  and text/photo delivery in both directions
 - Automatic topic creation
 - **SQLite** for routing + reply mapping, optional message history
 - Built with **aiogram 3**
@@ -47,6 +49,19 @@ pip install -r requirements.txt
 - DB_PATH — SQLite database path (required for routing)
 - LOG_MESSAGES — set to 0 to disable message history logging
 - START_MESSAGE — optional `/start` greeting (defaults to English)
+
+To mirror Telegram conversations into an external support backend, set all
+three bridge variables:
+
+```dotenv
+ADMIN_BRIDGE_URL=https://support-api.example.com
+ADMIN_BRIDGE_TOKEN=<shared bearer token, at least 32 characters>
+ADMIN_BRIDGE_BOT_INSTANCE_ID=<stable UUID for this bot instance>
+```
+
+When these variables are absent, the existing Telegram-only workflow is
+unchanged. The external service only needs to implement the small bridge
+contract described in [External admin bridge](docs/ADMIN_BRIDGE.md).
 
 3.	Run the bot:
 ```bash

@@ -161,6 +161,19 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_message_links_user_id
                   ON message_links(user_id);
+
+                CREATE TABLE IF NOT EXISTS admin_bridge_deliveries (
+                  outbox_id           INTEGER PRIMARY KEY,
+                  telegram_message_id INTEGER NOT NULL,
+                  topic_message_id    INTEGER NOT NULL,
+                  delivered_at        TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS admin_bridge_events (
+                  event_id     TEXT PRIMARY KEY,
+                  payload_json TEXT NOT NULL,
+                  created_at   TEXT NOT NULL
+                );
                 """
             )
             columns_cursor = await self.conn.execute("PRAGMA table_info(messages)")
@@ -421,6 +434,93 @@ class Database:
                 file_id=file_id,
                 payload_json=payload_json,
                 commit=False,
+            )
+
+    async def upsert_admin_bridge_event(
+        self,
+        *,
+        event_id: str,
+        payload_json: str,
+    ) -> None:
+        async with self._write_operation(commit=True):
+            await self.conn.execute(
+                """
+                INSERT INTO admin_bridge_events (event_id, payload_json, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(event_id) DO UPDATE SET
+                  payload_json = excluded.payload_json
+                """,
+                (event_id, payload_json, _now_iso()),
+            )
+
+    async def list_admin_bridge_events(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[tuple[str, str]]:
+        async with self._operation():
+            cursor = await self.conn.execute(
+                """
+                SELECT event_id, payload_json
+                  FROM admin_bridge_events
+                 ORDER BY created_at ASC
+                 LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+    async def delete_admin_bridge_event(self, event_id: str) -> None:
+        async with self._write_operation(commit=True):
+            await self.conn.execute(
+                "DELETE FROM admin_bridge_events WHERE event_id = ?",
+                (event_id,),
+            )
+
+    async def find_admin_bridge_delivery(
+        self,
+        outbox_id: int,
+    ) -> tuple[int, int] | None:
+        async with self._operation():
+            cursor = await self.conn.execute(
+                """
+                SELECT telegram_message_id, topic_message_id
+                  FROM admin_bridge_deliveries
+                 WHERE outbox_id = ?
+                """,
+                (outbox_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        if row is None:
+            return None
+        return int(row[0]), int(row[1])
+
+    async def record_admin_bridge_delivery(
+        self,
+        *,
+        outbox_id: int,
+        telegram_message_id: int,
+        topic_message_id: int,
+        commit: bool = True,
+    ) -> None:
+        async with self._write_operation(commit=commit):
+            await self.conn.execute(
+                """
+                INSERT INTO admin_bridge_deliveries (
+                  outbox_id, telegram_message_id, topic_message_id, delivered_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(outbox_id) DO NOTHING
+                """,
+                (
+                    outbox_id,
+                    telegram_message_id,
+                    topic_message_id,
+                    _now_iso(),
+                ),
             )
 
     async def healthcheck(self) -> dict[str, Any]:

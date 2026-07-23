@@ -44,12 +44,14 @@ class OperatorHandlerTests(IsolatedAsyncioTestCase):
             log_message_link=AsyncMock(),
             transaction=transaction,
         )
+        admin_bridge = SimpleNamespace(publish_operator_message=AsyncMock())
 
         await topic_message_to_user(
             message=message,
             bot=bot,
             db=db,
             log_messages=False,
+            admin_bridge=admin_bridge,
         )
 
         bot.copy_message.assert_awaited_once_with(
@@ -57,6 +59,9 @@ class OperatorHandlerTests(IsolatedAsyncioTestCase):
             from_chat_id=-1001,
             message_id=10,
             reply_parameters=None,
+        )
+        admin_bridge.publish_operator_message.assert_awaited_once_with(
+            message, 42, db
         )
 
     async def test_operator_reply_passes_selected_quote_to_user(self) -> None:

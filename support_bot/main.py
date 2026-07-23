@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
@@ -9,6 +10,7 @@ from aiogram import F
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
+from support_bot.admin_bridge import AdminBridgeSettings, AdminSupportBridge
 from support_bot.config import load_config
 from support_bot.db import Database
 from support_bot.handlers.operator import router as operator_router
@@ -25,6 +27,9 @@ async def _run() -> None:
 
     db: Database | None = None
     bot: Bot | None = None
+    admin_bridge: AdminSupportBridge | None = None
+    bridge_task: asyncio.Task[None] | None = None
+    bridge_stop = asyncio.Event()
     try:
         db = Database(config.db_path)
         await db.connect()
@@ -42,6 +47,25 @@ async def _run() -> None:
         dp["topics"] = topics
         dp["log_messages"] = config.log_messages
         dp["start_message"] = config.start_message
+        if config.admin_bridge_enabled:
+            admin_bridge = AdminSupportBridge(
+                AdminBridgeSettings(
+                    base_url=config.admin_bridge_url,
+                    token=config.admin_bridge_token,
+                    bot_instance_id=config.admin_bridge_bot_instance_id,
+                    operator_group_id=config.operator_group_id,
+                )
+            )
+            await admin_bridge.start()
+            dp["admin_bridge"] = admin_bridge
+            bridge_task = asyncio.create_task(
+                admin_bridge.poll_outbox(bot, db, bridge_stop),
+                name="admin-support-bridge",
+            )
+            log.info(
+                "Admin support bridge enabled for bot instance %s",
+                config.admin_bridge_bot_instance_id,
+            )
 
         dp.include_router(user_router)
 
@@ -53,6 +77,13 @@ async def _run() -> None:
         log.info("Started as @%s (id=%s)", me.username, me.id)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        bridge_stop.set()
+        if bridge_task is not None:
+            bridge_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await bridge_task
+        if admin_bridge is not None:
+            await admin_bridge.close()
         if db is not None:
             await db.close()
         if bot is not None:
