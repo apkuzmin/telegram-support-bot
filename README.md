@@ -1,5 +1,13 @@
 # Telegram Support Bot (aiogram 3 + Topics)
 
+This repository now also contains an independent **headless omnichannel
+support module**. It exposes REST/OpenAPI and WebSocket contracts for a future
+website while keeping Telegram as a synchronized customer/operator channel.
+It intentionally contains no website UI.
+
+See [Headless integration](docs/HEADLESS_INTEGRATION.md) for architecture,
+authentication, endpoints, PostgreSQL startup, Telegram worker and legacy
+SQLite migration.
 
 Open-source Telegram support bot: users chat with the bot in private messages, while operators work inside a **forum-enabled supergroup (Topics)**.  
 For each user, the bot automatically creates a **separate forum topic** and mirrors the entire conversation there. Operator replies from the topic are sent back to the user’s private chat.

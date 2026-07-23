@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: support
+      POSTGRES_USER: support
+      POSTGRES_PASSWORD: support-local-password
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - support-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U support -d support"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && uvicorn support_bot.omnichannel.api_main:app --host 0.0.0.0 --port 8080
+    environment:
+      SUPPORT_ENV: production
+      SUPPORT_DATABASE_URL: postgresql+asyncpg://support:support-local-password@postgres:5432/support
+      SUPPORT_AUTH_SECRET: ${SUPPORT_AUTH_SECRET:?Set SUPPORT_AUTH_SECRET in .env}
+      SUPPORT_ALLOWED_ORIGINS: ${SUPPORT_ALLOWED_ORIGINS:-http://localhost:3000}
+      SUPPORT_TRUSTED_HOSTS: ${SUPPORT_TRUSTED_HOSTS:-localhost,127.0.0.1,api}
+      SUPPORT_EXPOSE_DOCS: ${SUPPORT_EXPOSE_DOCS:-0}
+      SUPPORT_UPLOAD_DIR: /data/uploads
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - support-uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  telegram-worker:
+    build: .
+    command: ["python", "-m", "support_bot.omnichannel.telegram_main"]
+    environment:
+      SUPPORT_ENV: production
+      SUPPORT_DATABASE_URL: postgresql+asyncpg://support:support-local-password@postgres:5432/support
+      SUPPORT_AUTH_SECRET: ${SUPPORT_AUTH_SECRET:?Set SUPPORT_AUTH_SECRET in .env}
+      SUPPORT_TRUSTED_HOSTS: ${SUPPORT_TRUSTED_HOSTS:-localhost,127.0.0.1,api}
+      SUPPORT_UPLOAD_DIR: /data/uploads
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      OPERATOR_GROUP_ID: ${OPERATOR_GROUP_ID:-}
+      START_MESSAGE: ${START_MESSAGE:-Здравствуйте! Чем могу вам помочь?}
+    volumes:
+      - support-uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+volumes:
+  support-postgres:
+  support-uploads:
