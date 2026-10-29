@@ -1,6 +1,6 @@
 # Telegram Support Bot
 
-> **Each user → a separate forum topic for operators.**
+> **Each user → a separate forum topic for operators**
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![aiogram 3](https://img.shields.io/badge/aiogram-3-2CA5E0?logo=telegram&logoColor=white)](https://docs.aiogram.dev/)
